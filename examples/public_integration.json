@@ -1,0 +1,112 @@
+{
+  "at": 1789311312.8639045,
+  "kind": "READ_ONLY_PUBLIC_INTEGRATION",
+  "doctor": {
+    "mode": "paper_only",
+    "binance_key_present": false,
+    "public_binance_key_required": false,
+    "telegram_enabled": false,
+    "telegram_ready": false,
+    "dex_enabled": false,
+    "dex_provider": "jupiter",
+    "security_adapter_configured": false,
+    "remote_scanner_dataset_configured": false,
+    "note": "Absent optional credentials do not block CEX public-data paper trading; no 100x pretrained model is bundled.",
+    "online": {
+      "binance": {
+        "reachable": false,
+        "error": "Network timeout/error from api.binance.com"
+      },
+      "geckoterminal": {
+        "reachable": false,
+        "error": "Network timeout/error from api.geckoterminal.com"
+      }
+    }
+  },
+  "bootstrap": {
+    "archives": [
+      {
+        "symbol": "BTCUSDT",
+        "month": "2026-03",
+        "rows": 186
+      },
+      {
+        "symbol": "BTCUSDT",
+        "month": "2026-04",
+        "rows": 180
+      }
+    ],
+    "errors": [
+      {
+        "symbol": "BTCUSDT",
+        "month": "2026-05",
+        "error": "Network timeout/error from data.binance.vision"
+      },
+      {
+        "symbol": "BTCUSDT",
+        "month": "2026-06",
+        "error": "Network timeout/error from data.binance.vision"
+      },
+      {
+        "symbol": "BTCUSDT",
+        "month": "2026-07",
+        "error": "Network timeout/error from data.binance.vision"
+      },
+      {
+        "symbol": "BTCUSDT",
+        "month": "2026-08",
+        "error": "Network timeout/error from data.binance.vision"
+      },
+      {
+        "symbol": "BTCUSDT",
+        "stage": "recent",
+        "error": "Network timeout/error from api.binance.com"
+      },
+      {
+        "symbol": "ETHUSDT",
+        "month": "2026-03",
+        "error": "Network timeout/error from data.binance.vision"
+      },
+      {
+        "symbol": "ETHUSDT",
+        "month": "2026-04",
+        "error": "Network timeout/error from data.binance.vision"
+      },
+      {
+        "symbol": "ETHUSDT",
+        "month": "2026-05",
+        "error": "Network timeout/error from data.binance.vision"
+      },
+      {
+        "symbol": "ETHUSDT",
+        "month": "2026-06",
+        "error": "Network timeout/error from data.binance.vision"
+      },
+      {
+        "symbol": "ETHUSDT",
+        "month": "2026-07",
+        "error": "Network timeout/error from data.binance.vision"
+      },
+      {
+        "symbol": "ETHUSDT",
+        "month": "2026-08",
+        "error": "Network timeout/error from data.binance.vision"
+      },
+      {
+        "symbol": "ETHUSDT",
+        "stage": "recent",
+        "error": "Network timeout/error from api.binance.com"
+      }
+    ],
+    "source": "Binance public monthly archives"
+  },
+  "training": {
+    "status": "insufficient_mature_labels",
+    "rows": 318
+  },
+  "websocket": {
+    "synchronized": false,
+    "status": "no_fresh_book_within_10s"
+  },
+  "scanner_error": "Network timeout/error from api.geckoterminal.com"
+}

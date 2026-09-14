@@ -1,0 +1,97 @@
+{
+  "SYNTHETIC_ONLY": true,
+  "meaning": "Software behavior demo. These numbers are NOT historical or live returns.",
+  "cex_partial_filled": 0.5,
+  "cex_unknown_ack": "UNKNOWN",
+  "cex_equity": 99.91001999999999,
+  "dex_buy": "FILLED",
+  "dex_sell": "FILLED",
+  "dex_slippage_failure": "REVERTED_GAS_CHARGED",
+  "scanner_missing_security": {
+    "score": 65,
+    "score_denominator": 100,
+    "passed": 7,
+    "known": 7,
+    "total_checks": 12,
+    "checks": [
+      {
+        "name": "流动性门槛",
+        "weight": 15,
+        "pass": true,
+        "evidence": 100000.0
+      },
+      {
+        "name": "池龄 0.5–48 小时",
+        "weight": 5,
+        "pass": true,
+        "evidence": 1.0
+      },
+      {
+        "name": "小时换手不过热",
+        "weight": 10,
+        "pass": true,
+        "evidence": 0.5
+      },
+      {
+        "name": "有双向成交且买卖比适中",
+        "weight": 10,
+        "pass": true,
+        "evidence": {
+          "buys": 50.0,
+          "sells": 30.0
+        }
+      },
+      {
+        "name": "最近 30 分钟正动量但未翻倍",
+        "weight": 10,
+        "pass": true,
+        "evidence": 0.1
+      },
+      {
+        "name": "成交量增长不过热",
+        "weight": 10,
+        "pass": true,
+        "evidence": 2.0
+      },
+      {
+        "name": "距近期高点回撤有限",
+        "weight": 5,
+        "pass": true,
+        "evidence": -0.1
+      },
+      {
+        "name": "可卖出检查",
+        "weight": 10,
+        "pass": null,
+        "evidence": null
+      },
+      {
+        "name": "增发与冻结权限已撤销",
+        "weight": 10,
+        "pass": null,
+        "evidence": null
+      },
+      {
+        "name": "前十持仓占比低于 35%（剔除池）",
+        "weight": 5,
+        "pass": null,
+        "evidence": null
+      },
+      {
+        "name": "最大关联资金簇低于 20%",
+        "weight": 5,
+        "pass": null,
+        "evidence": null
+      },
+      {
+        "name": "创建者历史坏币率低于 20%",
+        "weight": 5,
+        "pass": null,
+        "evidence": null
+      }
+    ],
+    "blocked": [],
+    "security_verified": false,
+    "score_meaning": "Unvalidated heuristic priority score; not probability or proven edge"
+  }
+}

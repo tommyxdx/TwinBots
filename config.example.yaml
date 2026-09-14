@@ -1,0 +1,141 @@
+mode: paper
+data_dir: data
+bootstrap_on_start: true
+http:
+  timeout_s: 15
+  retries: 2
+  max_download_mb: 64
+  max_requests_per_day: 3000
+  min_interval_s: 0.15
+  host_intervals:
+    api.geckoterminal.com: 3
+    api.jup.ag: 1
+history:
+  archive_base: https://data.binance.vision
+  months: 12
+  interval: 4h
+  symbols: [BTCUSDT, ETHUSDT, SOLUSDT, DOGEUSDT]
+  refresh_after_hours: 24
+  verify_sha256: true
+  # Optional retrospective pool cohort CSV, including dead/failed pools.
+  # Columns: network,pool,token,created_at
+  pool_catalog_url: ""
+  # Optional PIT feature/label CSV; schema in docs/DATA.md.
+  scanner_dataset_url: ""
+  scanner_dataset_sha256: ""
+  dataset_api_key_env: DATA_API_KEY
+  dataset_header: Authorization
+  dataset_header_prefix: "Bearer "
+  # Prospective sample for scanner training; independent of score/winner status.
+  cohort_max_pools: 40
+  cohort_sample_fraction: 0.02
+  cohort_follow_days: 35
+  cohort_refresh_hours: 6
+scanner:
+  network: solana
+  gecko_base: https://api.geckoterminal.com/api/v2
+  poll_s: 300
+  pages: 1
+  max_candidates: 3
+  history_limit: 1000
+  min_liquidity_usd: 20000
+  max_age_hours: 48
+  min_score: 65
+  min_known_checks: 5
+  cooldown_hours: 12
+  notify_min_score_change: 15
+  # Optional GET URL: substitute {network}, {token}, {pool}.
+  # Returns documented point-in-time feature JSON, never arbitrary model code.
+  feature_url_template: ""
+  feature_api_key_env: FEATURE_API_KEY
+  feature_header: Authorization
+  feature_header_prefix: "Bearer "
+  feature_max_age_s: 300
+  model_min_rows: 300
+  model_min_positives: 25
+  targets:
+    - {name: x2_24h, multiple: 2, horizon_hours: 24}
+    - {name: x10_7d, multiple: 10, horizon_hours: 168}
+    - {name: x100_30d, multiple: 100, horizon_hours: 720}
+telegram:
+  enabled: false
+  token_env: TELEGRAM_BOT_TOKEN
+  chat_id_env: TELEGRAM_CHAT_ID
+cex:
+  enabled: true
+  rest_base: https://api.binance.com
+  ws_base: wss://stream.binance.com:9443
+  symbols: [BTCUSDT, ETHUSDT, SOLUSDT, DOGEUSDT]
+  interval: 4h
+  snapshot_limit: 1000
+  depth_stale_ms: 2000
+  signal_poll_s: 60
+  fee_rate: 0.001
+  fetch_account_fees: false
+  slippage_limit_bps: 35
+  visible_liquidity_fraction: 0.5
+  # A scenario, not measured exchange order latency.
+  latency_ms: [250, 750]
+  adverse_fill_bps: 3
+  # Simulator-only lost acknowledgment; exchange outcome is retained internally.
+  lost_ack_probability: 0.01
+  ack_reconcile_after_s: 2
+  model_threshold: 0.55
+  model_min_rows: 600
+  model_refresh_days: 7
+  strategy: adaptive
+  risk_fraction: 0.005
+  max_position_fraction: 0.25
+  max_positions: 2
+  max_drawdown: 0.10
+  stop_atr: 2.5
+  trail_atr: 3
+  min_stop_fraction: 0.02
+  max_stop_fraction: 0.10
+  initial_cash: 100
+dex:
+  enabled: false
+  # jupiter for Solana; generic for a custom amount-specific quote API.
+  provider: jupiter
+  # V1 is read-only quote compatible, configurable if provider migrates it.
+  quote_url: https://api.jup.ag/swap/v1/quote
+  quote_api_key_env: JUPITER_API_KEY
+  quote_header: x-api-key
+  quote_header_prefix: ""
+  quote_token: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+  quote_decimals: 6
+  quote_usd: 1.0
+  quote_asset_assumption: "USDC valued at USD 1; depeg not modeled"
+  initial_cash: 100
+  ticket_usd: 2
+  max_positions: 2
+  max_drawdown: 0.10
+  min_score: 75
+  # Missing enriched security features block new entries by default.
+  require_security_checks: true
+  max_roundtrip_cost_fraction: 0.03
+  slippage_bps: 100
+  max_price_impact_fraction: 0.02
+  latency_ms: [1000, 3000]
+  adverse_output_bps: 30
+  # Illustrative assumptions; configure for the selected chain and route.
+  gas_usd_per_tx: 0.01
+  extra_fee_usd: 0
+  dropped_probability: 0.01
+  revert_probability: 0.02
+  stop_fraction: 0.25
+  trail_fraction: 0.30
+  take_profit_activate_multiple: 2
+  max_hold_hours: 24
+  poll_s: 120
+  mark_every_s: 300
+  quote_max_age_s: 15
+  # Position marks become zero for conservative equity after this interval
+  # without an executable quote; token inventory remains open/unresolved.
+  stale_mark_s: 600
+  # Optional: GET {network},{token},{pool}, see docs/ADAPTERS.md.
+  generic_quote_url: ""
+runtime:
+  random_seed: 70431
+  persist_raw_depth: false
+  heartbeat_s: 60

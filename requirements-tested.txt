@@ -1,0 +1,6 @@
+# Versions used by the delivered test suite on Python 3.12.14.
+numpy==2.3.5
+pandas==2.2.3
+scikit-learn==1.8.0
+PyYAML==6.0.3
+websockets==16.0

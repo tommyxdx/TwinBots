@@ -1,0 +1,17 @@
+[Unit]
+Description=TwinCryptoBots paper research
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/ABSOLUTE/PATH/TwinCryptoBots
+ExecStart=/ABSOLUTE/PATH/TwinCryptoBots/.venv/bin/python -m twobots run
+Restart=on-failure
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

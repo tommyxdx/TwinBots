@@ -1,0 +1,32 @@
+{
+  "listen": "127.0.0.1",
+  "port": 8787,
+  "features": {
+    "upstream_url": "",
+    "api_key_env": "FEATURE_UPSTREAM_KEY",
+    "header": "Authorization",
+    "header_prefix": "Bearer ",
+    "params": {"network": "network", "token": "token", "pool": "pool"},
+    "fixed_params": {},
+    "fields": {
+      "network": "network", "token": "token", "pool": "pool", "asof": "asof",
+      "source": "source", "features.can_sell": "features.can_sell",
+      "features.mint_revoked": "features.mint_revoked", "features.freeze_revoked": "features.freeze_revoked",
+      "features.top10_ex_lp_fraction": "features.top10_ex_lp_fraction",
+      "features.largest_funding_cluster_fraction": "features.largest_funding_cluster_fraction",
+      "features.creator_bad_rate": "features.creator_bad_rate"
+    }
+  },
+  "quote": {
+    "upstream_url": "",
+    "api_key_env": "QUOTE_UPSTREAM_KEY",
+    "header": "x-api-key", "header_prefix": "",
+    "params": {"network": "network", "input_token": "input_token", "output_token": "output_token", "amount": "amount", "slippage_bps": "slippage_bps"},
+    "fixed_params": {},
+    "fields": {
+      "input_token": "input_token", "output_token": "output_token", "in_amount": "in_amount",
+      "out_amount": "out_amount", "min_out": "min_out", "price_impact_fraction": "price_impact_fraction",
+      "asof": "asof", "context_slot": "context_slot"
+    }
+  }
+}
