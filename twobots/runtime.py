@@ -52,18 +52,21 @@ def maintain(cfg,store,fetcher,bootstrap=False):
         with store.transaction() as db:
             db.execute("DELETE FROM scans WHERE ts<?",(cutoff,))
             db.execute("DELETE FROM events WHERE ts<?",(cutoff,))
-            db.execute("DELETE FROM marks WHERE ts<?",(cutoff,))
+            # Keep the equity path for full-experiment drawdown and forward
+            # validation. Deleting old marks can make a bad experiment look good.
             db.execute("DELETE FROM outbox WHERE ts<? AND status='sent'",(cutoff,))
         store.set("heartbeat:maintenance",time.time())
 
 
 async def maintenance_loop(cfg,store,fetcher):
     while True:
+        # services() already handled the optional startup bootstrap. In
+        # particular, bootstrap_on_start=False must not download immediately.
+        await asyncio.sleep(3600)
         try:
             await asyncio.to_thread(maintain,cfg,store,fetcher,True)
         except Exception as exc:
             LOG.warning("Maintenance incomplete: %s",exc)
-        await asyncio.sleep(3600)
 
 
 async def scanner_loop(scanner,cfg):

@@ -3,13 +3,13 @@ data_dir: data
 bootstrap_on_start: true
 http:
   timeout_s: 15
-  retries: 2
+  retries: 1
   max_download_mb: 64
-  max_requests_per_day: 3000
+  max_requests_per_day: 1000
   min_interval_s: 0.15
   host_intervals:
     api.geckoterminal.com: 3
-    api.jup.ag: 1
+    api.jup.ag: 2
 history:
   archive_base: https://data.binance.vision
   months: 12
@@ -27,16 +27,16 @@ history:
   dataset_header: Authorization
   dataset_header_prefix: "Bearer "
   # Prospective sample for scanner training; independent of score/winner status.
-  cohort_max_pools: 40
+  cohort_max_pools: 20
   cohort_sample_fraction: 0.02
   cohort_follow_days: 35
-  cohort_refresh_hours: 6
+  cohort_refresh_hours: 12
 scanner:
   network: solana
   gecko_base: https://api.geckoterminal.com/api/v2
-  poll_s: 300
+  poll_s: 600
   pages: 1
-  max_candidates: 3
+  max_candidates: 2
   history_limit: 1000
   min_liquidity_usd: 20000
   max_age_hours: 48
@@ -111,7 +111,7 @@ dex:
   max_positions: 2
   max_drawdown: 0.10
   min_score: 75
-  # Missing enriched security features block new entries by default.
+  # Missing boolean, concentration or creator-risk checks block new entries.
   require_security_checks: true
   max_roundtrip_cost_fraction: 0.03
   slippage_bps: 100
@@ -133,7 +133,7 @@ dex:
   # Position marks become zero for conservative equity after this interval
   # without an executable quote; token inventory remains open/unresolved.
   stale_mark_s: 600
-  # Optional: GET {network},{token},{pool}, see docs/ADAPTERS.md.
+  # Optional: GET {network},{token},{pool}, see docs/DATA.md.
   generic_quote_url: ""
 runtime:
   random_seed: 70431

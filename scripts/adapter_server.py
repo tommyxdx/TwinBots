@@ -10,7 +10,12 @@ import os
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse,parse_qs,urlencode
-from urllib.request import Request,urlopen
+from urllib.request import Request,build_opener,HTTPRedirectHandler
+
+
+class RejectRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ValueError("Upstream redirects are disabled")
 
 
 def map_fields(raw,fields):
@@ -49,12 +54,12 @@ def handler(config):
                 incoming = parse_qs(path.query)
                 params = {dest:incoming[src][0] for src,dest in c["params"].items() if src in incoming}
                 params.update(c.get("fixed_params",{}))
-                headers = {"User-Agent":"TwinCryptoBots-Adapter/1.0"}
+                headers = {"User-Agent":"TwinCryptoBots-Adapter/1.1.1"}
                 key = os.getenv(c.get("api_key_env",""),"")
                 if key:
                     headers[c.get("header","Authorization")] = c.get("header_prefix","")+key
                 url = c["upstream_url"]+("&" if "?" in c["upstream_url"] else "?")+urlencode(params)
-                with urlopen(Request(url,headers=headers),timeout=15) as response:
+                with build_opener(RejectRedirects()).open(Request(url,headers=headers),timeout=15) as response:
                     raw = response.read(1024*1024+1)
                 if len(raw)>1024*1024:
                     raise ValueError("Upstream response too large")

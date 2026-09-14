@@ -6,11 +6,20 @@ import math
 import os
 import random
 import time
+from decimal import Decimal, ROUND_DOWN, localcontext
 from .data import number, seconds
 from .execution import Ledger
 from .net import auth_headers
 
 LOG = logging.getLogger(__name__)
+
+
+def stressed_raw(amount, bps):
+    # Avoid binary-float rounding inventing raw units above 2**53.
+    with localcontext() as ctx:
+        ctx.prec = max(50, len(str(amount)) + 20)
+        return int((Decimal(amount)*(Decimal(1)-Decimal(str(bps))/10000))
+                   .to_integral_value(rounding=ROUND_DOWN))
 
 
 class QuoteGateway:
@@ -71,7 +80,7 @@ class DexPaper:
         return raw/10**self.c["quote_decimals"]*self.c["quote_usd"]
 
     def raw_usd(self,usd):
-        return int(usd/self.c["quote_usd"]*10**self.c["quote_decimals"])
+        return int(Decimal(str(usd))/Decimal(str(self.c["quote_usd"]))*10**self.c["quote_decimals"])
 
     async def quote(self,a,b,amount):
         return await asyncio.to_thread(self.gateway.quote,a,b,amount)
@@ -100,7 +109,7 @@ class DexPaper:
         except Exception:
             # Quote failure is NOT evidence of an on-chain failure; no fictitious gas.
             return self.ledger.finalize(order,"UNVERIFIABLE_NO_EXECUTION")
-        output = int(arrival["out_amount"]*(1-self.c["adverse_output_bps"]/10000))
+        output = stressed_raw(arrival["out_amount"], self.c["adverse_output_bps"])
         order.update({"arrival_quote":arrival,"stressed_output":output,"network_fee":gas})
         state = self.ledger.state()
         state["cash"] -= gas
@@ -134,19 +143,27 @@ class DexPaper:
         token = scan["token"]
         amount = self.raw_usd(self.c["ticket_usd"])
         buy = await self.quote(self.c["quote_token"],token,amount)
-        sell = await self.quote(token,self.c["quote_token"],buy["out_amount"])
+        available = stressed_raw(buy["out_amount"], self.c["adverse_output_bps"])
+        if available < buy["min_out"]:
+            return {"status": "ROUNDTRIP_COST_REJECTED", "reason": "buy_stress_below_minimum"}
+        sell = await self.quote(token,self.c["quote_token"],available)
         total_fee = 2*(self.c["gas_usd_per_tx"]+self.c["extra_fee_usd"])
-        roundtrip_cost = (self.usd(amount)-self.usd(sell["out_amount"])+total_fee)/self.usd(amount)
+        proceeds = self.usd(stressed_raw(sell["out_amount"], self.c["adverse_output_bps"]))
+        roundtrip_cost = (self.usd(amount)-proceeds+total_fee)/self.usd(amount)
         # The buy/sell quotes are sequential, so this is a cost screen, not arbitrage.
         if roundtrip_cost<0 or roundtrip_cost>self.c["max_roundtrip_cost_fraction"]:
             return {"status":"ROUNDTRIP_COST_REJECTED","cost_fraction":roundtrip_cost}
+        if (not 0 <= time.time()-(scan.get("history_asof") or 0) <= 900 or
+                (self.c["require_security_checks"] and not -5 <=
+                 time.time()-scan.get("security_source",{}).get("asof",0) <= self.cfg["scanner"]["feature_max_age_s"])):
+            return {"status": "ENTRY_DATA_EXPIRED"}
         return await self.swap(token,"BUY",amount,"scanner_and_trend_gate",buy)
 
     async def mark_and_exit(self):
         for token,p in list(self.ledger.state()["positions"].items()):
             try:
                 q = await self.quote(token,self.c["quote_token"],int(p["raw_qty"]))
-                value = max(0,self.usd(int(q["out_amount"]*(1-self.c["adverse_output_bps"]/10000)))
+                value = max(0,self.usd(stressed_raw(q["out_amount"],self.c["adverse_output_bps"]))
                             -self.c["gas_usd_per_tx"]-self.c["extra_fee_usd"])
                 p.update({"last_value":value,"last_mark_at":time.time(),"high_value":max(p["high_value"],value)})
                 state = self.ledger.state()
@@ -180,17 +197,24 @@ class DexPaper:
         state = self.ledger.state()
         if state["halted"] or len(state["positions"])>=self.c["max_positions"]:
             return
-        rows = self.store.rows("SELECT * FROM scans WHERE network=? AND ts>? AND score>=? ORDER BY ts DESC LIMIT 20",
-                               (self.cfg["scanner"]["network"],time.time()-2*self.cfg["scanner"]["poll_s"],self.c["min_score"]))
+        # A newer failed/low-score observation must supersede an older safe one,
+        # including observations of another pool for the same token.
+        rows = self.store.rows("""SELECT s.* FROM scans s WHERE s.network=? AND s.ts>?
+            AND NOT EXISTS (SELECT 1 FROM scans newer WHERE newer.network=s.network
+                AND newer.token=s.token AND (newer.ts>s.ts OR (newer.ts=s.ts AND newer.id>s.id)))
+            ORDER BY s.ts DESC LIMIT 20""",
+            (self.cfg["scanner"]["network"],time.time()-2*self.cfg["scanner"]["poll_s"]))
         for row in rows:
             scan = json.loads(row["payload"])
             token = scan["token"]
-            if token in state["positions"] or scan["blocked"] or not scan["history_fresh"]:
+            if (token in state["positions"] or scan["blocked"] or not scan["history_fresh"]
+                    or scan["score"] < self.c["min_score"] or not scan.get("market_eligible", False)
+                    or not 0 <= time.time()-(scan.get("history_asof") or 0) <= 900):
                 continue
-            if self.c["require_security_checks"] and not scan["security_verified"]:
+            if self.c["require_security_checks"] and not scan.get("risk_verified", False):
                 continue
             if (self.c["require_security_checks"] and
-                    time.time()-scan.get("security_source",{}).get("asof",0)>self.cfg["scanner"]["feature_max_age_s"]):
+                    not -5 <= time.time()-scan.get("security_source",{}).get("asof",0)<=self.cfg["scanner"]["feature_max_age_s"]):
                 continue
             r = scan["features"]
             # Adaptive sizing/entry filter: overheated/falling/noisy conditions stay in cash.

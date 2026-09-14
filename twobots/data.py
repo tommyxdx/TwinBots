@@ -226,6 +226,11 @@ class Fetcher:
             raw = payload.get("data", {}).get("attributes", {}).get("ohlcv_list", [])
             rows = []
             for ts, o, h, low, close, volume in raw:
+                if not all(number(x) is not None for x in (ts, o, h, low, close, volume)):
+                    continue
+                ts, o, h, low, close, volume = map(float, (ts, o, h, low, close, volume))
+                if ts != int(ts) or int(ts) % 300 or volume < 0:
+                    continue
                 if ts + 300 >= time.time():
                     continue
                 if min(o, h, low, close) <= 0 or low > min(o, close) or h < max(o, close):

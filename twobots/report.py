@@ -13,7 +13,24 @@ def build_report(cfg,store):
             continue
         mark = store.rows("SELECT ts,equity,payload FROM marks WHERE venue=? ORDER BY id DESC LIMIT 1",(venue,))
         orders = store.rows("SELECT status,count(*) AS n FROM orders WHERE venue=? GROUP BY status",(venue,))
+        path = store.rows("SELECT ts,equity FROM marks WHERE venue=? ORDER BY id", (venue,))
+        peak, max_dd = state["initial_cash"], 0.0
+        for point in path:
+            peak = max(peak, point["equity"])
+            max_dd = max(max_dd, 1-point["equity"]/peak)
+        details = json.loads(mark[0]["payload"]) if mark else {}
+        stale = details.get("stale_symbols", []) + details.get("unquotable_marked_zero", [])
+        settled = [json.loads(x["payload"]) for x in store.rows("SELECT payload FROM orders WHERE venue=?", (venue,))]
+        fills = sum(p.get("settled_status") in ("FILLED", "PARTIALLY_FILLED_CANCELED") for p in settled)
+        performance = {"filled_orders": fills, "no_fills": fills == 0,
+                       "realized_pnl": state["realized_pnl"], "fees": state["fees"],
+                       "observed_max_drawdown": max_dd if path else None,
+                       "net_return_at_last_mark": mark[0]["equity"]/state["initial_cash"]-1 if mark else None,
+                       "mark_age_s": time.time()-mark[0]["ts"] if mark else None,
+                       "stale_inventory": stale, "mark_count": len(path),
+                       "warning": "Sampled paper marks, not validated profitability; subscriptions/hosting excluded and execution assumptions unverified"}
         accounts[venue] = {"account":state,"latest_mark":mark,"orders_by_status":orders,
+                           "forward_metrics": performance,
                            "capital_scope":"Separate hypothetical account; do not add CEX and DEX returns as one $100 portfolio"}
     scans = store.rows("SELECT payload FROM scans ORDER BY id DESC LIMIT 20")
     return {"generated_at":time.time(),"mode":"PAPER_ONLY","accounts":accounts,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import math
 from pathlib import Path
 import yaml
 
@@ -20,6 +21,16 @@ def load_config(path="config.yaml"):
     if not path.exists():
         raise ValueError("Copy config.example.yaml to config.yaml first.")
     cfg = yaml.safe_load(path.read_text(encoding="utf-8-sig"))
+    def finite_config(value):
+        if isinstance(value, dict):
+            for item in value.values():
+                finite_config(item)
+        elif isinstance(value, list):
+            for item in value:
+                finite_config(item)
+        elif isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("Configuration numbers must be finite")
+    finite_config(cfg)
     if cfg.get("mode") != "paper":
         raise ValueError("Only mode: paper is supported. Real trading is not implemented.")
     root = Path(cfg["data_dir"])
@@ -68,4 +79,10 @@ def load_config(path="config.yaml"):
         raise ValueError("Invalid DEX output/slippage range")
     if cfg["scanner"]["network"] != "solana" and cfg["dex"]["enabled"] and cfg["dex"]["provider"] == "jupiter":
         raise ValueError("Jupiter is Solana-only. Configure generic provider for other chains.")
+    if not 0 < c["min_stop_fraction"] <= c["max_stop_fraction"] < 1:
+        raise ValueError("Invalid CEX stop range")
+    if not 0 < c["model_threshold"] < 1 or c["stop_atr"] <= 0 or c["trail_atr"] <= 0:
+        raise ValueError("Invalid CEX model or ATR threshold")
+    if not 0 < cfg["dex"]["stop_fraction"] < 1 or not 0 < cfg["dex"]["trail_fraction"] < 1:
+        raise ValueError("Invalid DEX stop/trailing fraction")
     return cfg
