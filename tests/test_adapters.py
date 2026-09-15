@@ -369,6 +369,32 @@ def test_a_missing_archive_is_a_hole_not_a_crash(tmp_path, monkeypatch):
         prices.at(int(now - 60 * DAY))
 
 
+def test_a_sample_stops_at_the_page_cap_without_calling_it_a_failure():
+    """Any active wallet has more than one page, and the shape sample only wants
+    one. Treating 'there is more' as an error rejected every real trader at the
+    first step."""
+    from adapters.helius import Helius, TooMuchHistory
+    client = Helius.__new__(Helius)
+    client.calls = 0
+    pages = [{"data": [{"blockTime": 1, "signature": f"s{i}"}], "paginationToken": f"t{i}"}
+             for i in range(5)]
+    calls = {"n": 0}
+
+    def rpc(method, params):
+        page = pages[calls["n"]]
+        calls["n"] += 1
+        return page
+
+    client.rpc = rpc
+    got = list(client.transactions("addr", max_pages=1, partial_ok=True))
+    assert len(got) == 1 and calls["n"] == 1, "one page requested, one page returned"
+
+    calls["n"] = 0
+    with pytest.raises(TooMuchHistory):
+        # A caller that needs the whole history still has to hear about the cap.
+        list(client.transactions("addr", max_pages=2))
+
+
 class FakeHelius:
     def __init__(self, entries, size=None):
         self.entries, self.calls = entries, 1

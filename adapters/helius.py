@@ -74,11 +74,15 @@ class Helius:
         raise RuntimeError("RPC request failed")
 
     def transactions(self, address, since_ts=None, until_ts=None, limit=PAGE, max_pages=400,
-                     sort_order="asc"):
+                     sort_order="asc", partial_ok=False):
         """Full transactions touching `address`, including its token accounts.
 
         Ascending by default so a partial run still yields a contiguous prefix of
         history rather than a hole in the middle of it.
+
+        `partial_ok` distinguishes a caller that wants a sample from one that
+        needs the whole history: running out of pages is a normal stop for the
+        first and a failure for the second.
         """
         options = {"transactionDetails": "full", "encoding": "jsonParsed",
                    "commitment": "finalized", "maxSupportedTransactionVersion": 0,
@@ -102,7 +106,8 @@ class Helius:
             token, pages = result.get("paginationToken"), pages + 1
             if not token:
                 return
-        raise TooMuchHistory(f"History exceeded {max_pages} pages of {limit}")
+        if not partial_ok:
+            raise TooMuchHistory(f"History exceeded {max_pages} pages of {limit}")
 
     def history_size(self, address, probe_pages=2, limit=PAGE):
         """Signatures only, to size a wallet before paying for its full history.

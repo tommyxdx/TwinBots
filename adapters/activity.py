@@ -91,7 +91,12 @@ def poll_once(addresses, helius, sol_price, out_dir, lookback_s):
     price_usd = quote_pricer(sol_price)
     written = {}
     for address in addresses:
-        entries = list(helius.transactions(address, since_ts=int(now - lookback_s), max_pages=5))
+        # Newest first and partial: a busy leader should still yield its latest
+        # fills rather than an error, and the oldest of the window are the
+        # ones worth losing.
+        entries = list(helius.transactions(address, since_ts=int(now - lookback_s),
+                                           max_pages=5, sort_order="desc",
+                                           partial_ok=True))
         fills = fills_from_entries(entries, address, price_usd)
         write_feed(out_dir, address, fills, now)
         written[address] = len(fills)

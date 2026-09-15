@@ -121,7 +121,8 @@ def build(address, helius, sol_price, now=None, quote_marks=True, max_pages=400,
     # and forwarding almost all of it is a distributor or bundler: the outcome
     # happens at whatever address received the tokens, never here, so its record
     # is unusable no matter how much of it is reconstructed.
-    sample = list(helius.transactions(address, max_pages=1, sort_order="desc"))
+    sample = list(helius.transactions(address, max_pages=1, sort_order="desc",
+                                      partial_ok=True))
     mix = activity_mix(sample, address)
     exits = mix.get("sell", 0) + mix.get("batch_sell", 0)
     forwarded = mix.get("transfer_out", 0)
