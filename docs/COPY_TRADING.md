@@ -43,6 +43,15 @@
 
 这里**不需要**完整成本历史——那是排名阶段的事。跟单只需要"谁、什么时候、买卖了哪个币、多大"。
 
+内置适配器可以直接产出这份数据，轮询和 Webhook 两种模式（后者便宜约 100 倍）：
+
+```bash
+python -m adapters.activity poll --data-dir data --out wallet_activity --watch
+python -m adapters.activity webhook --out wallet_activity --port 8788
+```
+
+数据源选型、延迟与费用对比见 [DATA_SOURCES.md](DATA_SOURCES.md)。
+
 ## 延迟闸门
 
 跟单失败最主要的原因是延迟。程序有两道闸：

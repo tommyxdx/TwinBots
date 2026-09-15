@@ -4,7 +4,7 @@
 
 `scanner.kind: wallets` 是新默认。扫描器从 Solana 近期池成交发送地址发现候选，也接受 `wallets.addresses` 名单和本地账本文件。只有成本、成交、费用、库存和覆盖范围通过校验的完整账本才进入评分。
 
-本版提供本地 JSON 导入与通用只读 GET 适配器，**没有直接把 Birdeye/Helius 原始响应转成完整账本的供应商实现**。未提供账本时可发现地址，但输出 `unavailable`，不会产生真实排行榜。不能将供应商 PnL 汇总 URL 直接填入 `wallets.url_template`。
+账本可以自己准备，也可以用内置适配器从链上还原：`python -m adapters.ledger --address <公钥> --out wallet_ledgers`，数据源与成本见 [DATA_SOURCES.md](DATA_SOURCES.md)。未提供账本时可发现地址，但输出 `unavailable`，不会产生真实排行榜。不能将供应商 PnL 汇总 URL 直接填入 `wallets.url_template`。
 
 钱包排名不训练模型，不使用 LLM，不签名、不广播。CEX 原模拟策略独立保留。钱包模式要求 `dex.enabled: false`（那是旧的按代币评分的 DEX paper，可通过明确设置 `scanner.kind: tokens` 使用）；跟单走 `follow.enabled`，需要另一份近实时成交流，见 [COPY_TRADING.md](COPY_TRADING.md)。
 
