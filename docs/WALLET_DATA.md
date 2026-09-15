@@ -35,18 +35,30 @@
 | 层级 | 字段与类型 | 含义 |
 |---|---|---|
 | 根对象 | `schema_version: 1`, `currency: USD`, `network: solana`, `address`, `source` | 格式、币种、钱包公钥、来源及处理版本 |
-| 根对象 | `history_start`, `asof` | Unix 秒；历史从空交易库存起，至少覆盖扫描前 90 天及更早的成本 |
+| 根对象 | `history_start`, `asof` | Unix 秒；历史从空交易库存起，至少覆盖 `wallets.min_history_days`（默认 30 天）及更早的成本 |
 | `quality` 对象 | `complete`, `initial_inventory_empty`, `all_protocols`, `fees_included`, `transfers_included`, `failed_transactions_included` | 必须为真实布尔值；所有项确实为 true 才允许计算 |
-| `transactions` 列表 | 每条含 `id`, `ts`, `side`, `token`, `quantity`, `notional_usd`, `fee_usd` | `side` 为 buy/sell；数量、USD 金额可用十进制字符串 |
+| `transactions` 列表 | 每条含 `id`, `ts`, `side`, `fee_usd`，其余按 `side` 而定 | `side` 为 buy/sell/fee/transfer_in/transfer_out/swap/batch_sell，见下表；数量与金额可用十进制字符串 |
 | `marks` 列表 | 每条含 `token`, `quantity`, `value_usd`, `asof` | 所有未平仓资产的数量和 USD 估值；空仓显式给 `[]` |
 
 事务 ID 应为交易签名与资产腿序号组合，不能重复使用多资产交易共享的签名。记录按真实执行顺序排列，同秒也不能颠倒。全部分页完成后才可声明 `complete: true`，最多 50,000 条、默认文件上限 10 MB；达到上限应输出缺失，不能静默截断。
 
-`asof` 默认不得落后六小时，库存估值不得落后账本一小时。不能在第 90 天直接截断早期买入。`notional_usd` 是成交时 USD 对价，不能用今天价格回填；`fee_usd` 是该资产腿独占的全部成本。已体现在实际数量/净额中的池费用不能重复扣；同笔 gas/优先费只能分摊一次。交换两种研究资产通常应产生一卖一买。计价现金进出不算交易利润，不能伪造为低成本买入。
+`asof` 默认不得落后六小时，库存估值不得落后账本一小时。不能在历史下限那一天直接截断早期买入。`notional_usd` 是成交时 USD 对价，不能用今天价格回填；`fee_usd` 是该资产腿独占的全部成本。已体现在实际数量/净额中的池费用不能重复扣；同笔 gas/优先费只能分摊一次。交换两种研究资产通常应产生一卖一买。计价现金进出不算交易利润，不能伪造为低成本买入。
 
 买入成本加费用，卖出按当时移动加权成本匹配，扣卖出费用。`side: fee` 配合 `id/ts/fee_usd` 记录失败交易 gas 等独立费用。完整清仓才结束持仓周期；部分卖出不增加胜场。跨窗口周期保留窗口内已实现盈亏，但不计入该窗口的完整周期胜率。
 
-本版不支持转入/转出交易资产、空投、借贷、LP 和衍生品会计。发现此类活动、卖出超过已知库存、未知成本或遗漏协议时该钱包不排名。**不要为通过校验把转账改为零成本买入，或强行把质量声明改为 true。** 覆盖声明会出现在报告里，程序无法从一份 JSON 独立证明没有漏数据。
+转入、转出、代币互换和批量卖出都有对应的 `side`，不再导致整个钱包出局；借贷、LP 和衍生品仍不支持。卖出超过已知库存、未知成本或遗漏协议时该钱包不排名。**不要为通过校验把转账写成零成本买入，或强行把质量声明改为 true。** 转入写成 `buy` 会让空投被算成交易利润，这正是 `transfer_in` 存在的原因。覆盖声明会出现在报告里，程序无法从一份 JSON 独立证明没有漏数据。
+
+### 每种 side 的字段
+
+| `side` | 额外字段 | 会计处理 |
+|---|---|---|
+| `buy` | `token`, `quantity`, `notional_usd` | 计入有成本基准的库存 |
+| `sell` | `token`, `quantity`, `notional_usd` | 按持有比例拆分给两种来源，分别结算 |
+| `fee` | 无 | 独立 gas，直接减少已实现盈亏 |
+| `transfer_in` | `token`, `quantity` | 零成本库存，卖出后盈亏进 `external_origin_pnl_usd` |
+| `transfer_out` | `token`, `quantity` | 按成本移出，不实现盈亏，累计 `censored_cost_usd` |
+| `swap` | `token_out`, `quantity_out`, `token_in`, `quantity_in` | 成本结转，不实现盈亏，不需要价格 |
+| `batch_sell` | `legs[{token,quantity}]`, `notional_usd` | 按成本基准比例分摊收入，钱包打 `allocation_estimated` |
 
 未平仓 token 必须逐项提供数量吻合的估值；无法估值应输出缺失。确认不可兑现的资产可以保守记零并保留数量，不能删除亏损库存。浮盈不能抵消未平仓亏损的排名扣分项。
 

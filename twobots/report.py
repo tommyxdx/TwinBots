@@ -87,13 +87,17 @@ def export_report(cfg,store):
             values = [wallet["rank"] or "观察", wallet["address"], fmt(m["realized_pnl_usd"]),
                       fmt(m["cost_roi"], True), m["closed_cycles"], m["trade_fills"], fmt(m["win_rate"], True),
                       fmt(m["profit_factor"]), fmt(m["without_best_token_pnl_usd"]), fmt(wallet["open_loss_usd"]),
+                      fmt(m["external_origin_pnl_usd"]), fmt(wallet["censored_cost_fraction"], True),
                       fmt(wallet["score"])]
             rows.append("<tr>" + "".join("<td>" + html.escape(str(v)) + "</td>" for v in values) + "</tr>")
         headings = ["排名", "钱包地址", "已实现净盈亏 $", "已售成本收益率", "完整平仓", "成交次数", "胜率",
-                    "Profit Factor", "去掉最大盈利币后 $", "未平仓亏损 $", "研究分数"]
+                    "Profit Factor", "去掉最大盈利币后 $", "未平仓亏损 $", "转入币盈亏 $", "记录缺口",
+                    "研究分数"]
         cards.append("<section><h2>钱包历史表现 · 90 天</h2><p>"
                      + ("数据已过期，请重新扫描。" if wallets["stale"] else "各钱包数据截止时间见审计明细。")
                      + "胜率按完整持仓周期计算，跨窗口周期不计入胜率；分数不是盈利概率。"
+                     + "转入币盈亏来自空投或从其它地址转入的库存，不计入收益率和胜率；"
+                     + "记录缺口是转出到其它地址的成本占比，越高说明这个钱包的实际去向越看不到。"
                      + f"数据不足的钱包：{len(wallets['unavailable'])} 个。</p><div style='overflow-x:auto'><table><thead><tr>"
                      + "".join("<th>" + h + "</th>" for h in headings) + "</tr></thead><tbody>"
                      + "".join(rows) + "</tbody></table></div></section>")

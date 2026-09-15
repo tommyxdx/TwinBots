@@ -46,15 +46,28 @@ def leaders_from_store(data_dir):
 
 
 def fills_from_entries(entries, address, price_usd):
-    """Leader fills. Unlike the ledger this needs no cost basis, only direction and size."""
+    """Leader fills. Unlike the ledger this needs no cost basis, only direction.
+
+    A swap or a batch sale says the leader left a position, which is worth
+    mirroring, but not what the next entry cost. Exits carry an unknown size,
+    which the copy trader does not gate on; the entry side of a swap is dropped
+    rather than sized from a number nobody has. Transfers are not trades.
+    """
     fills = []
     for row in sorted((normalize(e, address) for e in entries),
                       key=lambda r: (r["ts"], r["slot"], r["order"])):
-        side, mint, quantity, notional = classify(row, quote_usd(row, price_usd))
-        if side not in ("buy", "sell"):
-            continue
-        fills.append({"id": row["signature"] + ":0", "ts": row["ts"], "side": side,
-                      "token": mint, "notional_usd": str(notional)})
+        side, payload = classify(row, quote_usd(row, price_usd))
+        signature, ts = row["signature"], row["ts"]
+        if side in ("buy", "sell"):
+            fills.append({"id": signature + ":0", "ts": ts, "side": side,
+                          "token": payload["token"], "notional_usd": str(payload["notional_usd"])})
+        elif side == "swap":
+            fills.append({"id": signature + ":out", "ts": ts, "side": "sell",
+                          "token": payload["token_out"], "notional_usd": "0"})
+        elif side == "batch_sell":
+            fills += [{"id": f"{signature}:{i}", "ts": ts, "side": "sell",
+                       "token": leg["token"], "notional_usd": "0"}
+                      for i, leg in enumerate(payload["legs"])]
     return fills[-MAX_FILLS:]
 
 

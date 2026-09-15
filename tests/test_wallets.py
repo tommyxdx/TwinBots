@@ -138,12 +138,116 @@ class WalletAccounting(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         analyze(data)
 
-    def test_bad_cost_or_transfers_cannot_be_zero_cost_profit(self):
-        for side in ("transfer_in", "airdrop", "sell"):
+    def test_unknown_side_and_unbacked_sale_are_rejected(self):
+        for side in ("airdrop", "sell"):
             data = ledger(now=NOW)
             data["transactions"][0]["side"] = side
             with self.assertRaises(ValueError):
                 analyze(data)
+
+    def test_transferred_in_inventory_is_not_trading_profit(self):
+        """An airdrop sold for 5000 must not touch cost_roi, cycles or win rate."""
+        clean = analyze(ledger(now=NOW))
+        data = ledger(now=NOW)
+        token = address(900)
+        data["transactions"] += [
+            {"id": "drop", "ts": NOW-200, "side": "transfer_in", "token": token,
+             "quantity": "1", "fee_usd": "0"},
+            {"id": "dump", "ts": NOW-100, "side": "sell", "token": token,
+             "quantity": "1", "notional_usd": "5000", "fee_usd": "0"}]
+        result = analyze(data)
+        m, before = result["windows"]["90"], clean["windows"]["90"]
+        self.assertEqual(m["external_origin_pnl_usd"], 5000)
+        self.assertEqual(m["realized_pnl_usd"], before["realized_pnl_usd"])
+        self.assertEqual(m["cost_roi"], before["cost_roi"])
+        self.assertEqual(m["closed_cycles"], before["closed_cycles"])
+        self.assertEqual(m["win_rate"], before["win_rate"])
+
+    def test_token_swap_carries_basis_and_keeps_total_profit_exact(self):
+        """Neither leg supplies a USD price, so nothing is realised at the swap.
+
+        Buying A for 500, swapping all of it into B, then selling B for 900 must
+        report the same 400 as buying A and selling it for 900 directly.
+        """
+        direct = ledger(now=NOW)
+        a, b = address(900), address(901)
+        direct["transactions"] += [
+            {"id": "buy", "ts": NOW-5000, "side": "buy", "token": a,
+             "quantity": "10", "notional_usd": "500", "fee_usd": "0"},
+            {"id": "out", "ts": NOW-100, "side": "sell", "token": a,
+             "quantity": "10", "notional_usd": "900", "fee_usd": "0"}]
+        swapped = ledger(now=NOW)
+        swapped["transactions"] += [
+            {"id": "buy", "ts": NOW-5000, "side": "buy", "token": a,
+             "quantity": "10", "notional_usd": "500", "fee_usd": "0"},
+            {"id": "swap", "ts": NOW-3000, "side": "swap", "token_out": a, "quantity_out": "10",
+             "token_in": b, "quantity_in": "4", "fee_usd": "0"},
+            {"id": "out", "ts": NOW-100, "side": "sell", "token": b,
+             "quantity": "4", "notional_usd": "900", "fee_usd": "0"}]
+        one, two = analyze(direct)["windows"]["90"], analyze(swapped)["windows"]["90"]
+        self.assertEqual(one["realized_pnl_usd"], two["realized_pnl_usd"])
+        self.assertEqual(one["sold_cost_usd"], two["sold_cost_usd"])
+        self.assertEqual(one["closed_cycles"], two["closed_cycles"])
+        self.assertEqual(analyze(swapped)["censored_cost_fraction"], 0)
+
+    def test_transfer_out_censors_the_cycle_instead_of_scoring_it(self):
+        data = ledger(now=NOW)
+        token = address(902)
+        data["transactions"] += [
+            {"id": "buy", "ts": NOW-5000, "side": "buy", "token": token,
+             "quantity": "10", "notional_usd": "500", "fee_usd": "0"},
+            {"id": "move", "ts": NOW-100, "side": "transfer_out", "token": token,
+             "quantity": "10", "fee_usd": "0"}]
+        base, result = analyze(ledger(now=NOW)), analyze(data)
+        self.assertEqual(result["censored_cost_usd"], 500)
+        self.assertGreater(result["censored_cost_fraction"], 0)
+        # The outcome is unobservable, so it is neither a win nor a loss.
+        self.assertEqual(result["windows"]["90"]["closed_cycles"],
+                         base["windows"]["90"]["closed_cycles"])
+        self.assertEqual(result["windows"]["90"]["realized_pnl_usd"],
+                         base["windows"]["90"]["realized_pnl_usd"])
+        self.assertEqual(result["open_tokens"], 0)
+
+    def test_heavily_censored_record_cannot_rank(self):
+        data = ledger(now=NOW)
+        data["transactions"] += [
+            {"id": f"b{i}", "ts": NOW-5000+i, "side": "buy", "token": address(910 + i),
+             "quantity": "10", "notional_usd": "2000", "fee_usd": "0"} for i in range(12)]
+        data["transactions"] += [
+            {"id": f"m{i}", "ts": NOW-1000+i, "side": "transfer_out", "token": address(910 + i),
+             "quantity": "10", "fee_usd": "0"} for i in range(12)]
+        result = rank_wallets([analyze(data)])[0]
+        self.assertGreater(result["censored_cost_fraction"], .25)
+        self.assertIn("record_materially_censored", result["flags"])
+        self.assertIsNone(result["score"])
+
+    def test_batch_sell_splits_proceeds_by_cost_and_is_flagged(self):
+        data = ledger(now=NOW)
+        a, b = address(903), address(904)
+        data["transactions"] += [
+            {"id": "ba", "ts": NOW-5000, "side": "buy", "token": a,
+             "quantity": "10", "notional_usd": "300", "fee_usd": "0"},
+            {"id": "bb", "ts": NOW-4900, "side": "buy", "token": b,
+             "quantity": "10", "notional_usd": "100", "fee_usd": "0"},
+            {"id": "batch", "ts": NOW-100, "side": "batch_sell", "notional_usd": "800",
+             "fee_usd": "0", "legs": [{"token": a, "quantity": "10"},
+                                      {"token": b, "quantity": "10"}]}]
+        result = rank_wallets([analyze(data)])[0]
+        m = result["windows"]["90"]
+        self.assertEqual(result["estimated_allocation_rows"], 1)
+        self.assertIn("allocation_estimated", result["flags"])
+        # 800 split 3:1 by basis gives both legs the same 100% return.
+        self.assertAlmostEqual(m["realized_pnl_usd"], 1500 + 400)
+        self.assertEqual(result["open_tokens"], 0)
+
+    def test_history_floor_is_thirty_days_and_short_samples_are_downweighted(self):
+        data = ledger(now=NOW)
+        data["history_start"] = NOW - 40 * DAY
+        data["transactions"] = [t for t in data["transactions"] if t["ts"] >= NOW - 35 * DAY]
+        result = analyze(data)
+        self.assertLess(result["windows"]["90"]["active_weeks"], 6)
+        with self.assertRaises(ValueError):
+            analyze_ledger(data, data["address"], now=NOW, min_history_days=90)
 
     def test_invalid_identity_duplicate_and_nonfinite_amount_rejected(self):
         original = ledger(now=NOW)

@@ -2,10 +2,11 @@
 
     python -m adapters.ledger --address <pubkey> --out wallet_ledgers
 
-The ledger is written only if every transaction touching a research token could
-be reconstructed. A wallet with transfers, airdrops or token-for-token swaps has
-an unknowable cost basis, so the adapter reports why and writes nothing rather
-than inventing a zero-cost entry that would flatter the wallet's record.
+Transfers, airdrops, token-for-token swaps and batch exits are all recorded in a
+form the accounting can hold open without inventing a cost basis for them. What
+remains unusable is a transaction whose cost has no defensible allocation across
+several acquired tokens; the adapter reports that and writes nothing, rather than
+guessing a split that would decide the wallet's rank.
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ import urllib.parse
 import urllib.request
 
 from twobots.config import load_env
+from twobots.wallets import new_position, remove
 
 from .helius import Helius
 from .prices import SolPrice, quote_pricer
@@ -32,15 +34,34 @@ QUALITY = ("complete", "initial_inventory_empty", "all_protocols", "fees_include
 
 
 def inventory(rows):
-    """Replay the rows exactly as the bot will, so marks reconcile to the cent."""
-    held = {}
+    """Replay quantities with the bot's own position arithmetic.
+
+    The proportional split between bought and transferred-in coins is not
+    reproducible by a simpler running total, and a mark that misses it by a
+    rounding step is rejected outright, so the same helpers are reused here.
+    """
+    positions = {}
     for row in rows:
-        if row["side"] not in ("buy", "sell"):
+        side = row["side"]
+        if side == "fee":
             continue
-        quantity = Decimal(row["quantity"])
-        token = row["token"]
-        held[token] = held.get(token, Decimal(0)) + (quantity if row["side"] == "buy" else -quantity)
-    return {token: amount for token, amount in held.items() if amount != 0}
+        if side in ("buy", "transfer_in"):
+            position = positions.setdefault(row["token"], new_position(row["ts"]))
+            position["traded_qty" if side == "buy" else "external_qty"] += Decimal(row["quantity"])
+        elif side in ("sell", "transfer_out"):
+            remove(positions[row["token"]], Decimal(row["quantity"]), side)
+        elif side == "swap":
+            out_qty, in_qty = Decimal(row["quantity_out"]), Decimal(row["quantity_in"])
+            traded, _, _ = remove(positions[row["token_out"]], out_qty, "Swap")
+            share = traded / out_qty if out_qty > 0 else Decimal(0)
+            target = positions.setdefault(row["token_in"], new_position(row["ts"]))
+            target["traded_qty"] += in_qty * share
+            target["external_qty"] += in_qty * (Decimal(1) - share)
+        elif side == "batch_sell":
+            for leg in row["legs"]:
+                remove(positions[leg["token"]], Decimal(leg["quantity"]), "Batch leg")
+    return {token: p["traded_qty"] + p["external_qty"] for token, p in positions.items()
+            if p["traded_qty"] > 0 or p["external_qty"] > 0}
 
 
 def jupiter_value_usd(mint, quantity, decimals, timeout=20):
@@ -73,7 +94,8 @@ def reason_counts(rejected):
     return dict(sorted(counts.items()))
 
 
-def build(address, helius, sol_price, now=None, quote_marks=True, max_pages=400):
+def build(address, helius, sol_price, now=None, quote_marks=True, max_pages=400,
+          min_history_days=30):
     """-> (ledger or None, report). None means the wallet cannot be ranked honestly.
 
     Being unusable is an ordinary outcome, not an error, so the report always
@@ -86,12 +108,13 @@ def build(address, helius, sol_price, now=None, quote_marks=True, max_pages=400)
         return None, {**report, "usable": False, "blocked_by": "no_transactions"}
     first = min(int(e["blockTime"]) for e in entries)
     report["history_days"] = int((now - first) / DAY)
-    if first > now - 90 * DAY:
-        return None, {**report, "usable": False, "blocked_by": "history_shorter_than_90_days"}
+    if first > now - min_history_days * DAY:
+        return None, {**report, "usable": False,
+                      "blocked_by": f"history_shorter_than_{min_history_days}_days"}
     sol_price.load(first - 3600, now)
     rows, rejected = ledger_rows(entries, address, quote_pricer(sol_price))
-    trades = [r for r in rows if r["side"] in ("buy", "sell")]
-    report.update(usable_rows=len(rows), trade_rows=len(trades), unreconstructable=len(rejected),
+    by_side = reason_counts([{"reason": r["side"]} for r in rows])
+    report.update(usable_rows=len(rows), rows_by_side=by_side, unreconstructable=len(rejected),
                   reasons=reason_counts(rejected))
     if rejected:
         return None, {**report, "usable": False, "blocked_by": "unreconstructable_cost_basis",
@@ -126,6 +149,8 @@ def main(argv=None):
     parser.add_argument("--out", default="wallet_ledgers", help="Directory for <address>.json")
     parser.add_argument("--cache", default="data/downloads", help="Kline archive cache")
     parser.add_argument("--max-pages", type=int, default=400)
+    parser.add_argument("--min-history-days", type=int, default=30,
+                        help="Match wallets.min_history_days in config.yaml")
     parser.add_argument("--no-quote-marks", action="store_true",
                         help="Skip Jupiter and mark all open inventory at zero")
     parser.add_argument("--diagnose", action="store_true",
@@ -140,7 +165,8 @@ def main(argv=None):
         try:
             ledger, report = build(address, helius, sol_price,
                                    quote_marks=not args.no_quote_marks and not args.diagnose,
-                                   max_pages=args.max_pages)
+                                   max_pages=args.max_pages,
+                                   min_history_days=args.min_history_days)
         except Exception as exc:
             reports.append({"address": address, "usable": False, "error": str(exc)})
             continue

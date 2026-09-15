@@ -12,7 +12,9 @@ import re
 import time
 
 DAY = 86400
+DUST = Decimal("1e-24")
 BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+TRADE_SIDES = ("buy", "sell", "fee", "transfer_in", "transfer_out", "swap", "batch_sell")
 
 
 def valid_address(value):
@@ -50,7 +52,41 @@ def ratio(a, b):
     return float(a / b) if b else None
 
 
-def analyze_ledger(data, address, network="solana", now=None, max_age_s=21600):
+def new_position(ts):
+    """Inventory split by origin. Externally received coins carry no cost basis."""
+    return {"traded_qty": Decimal(0), "traded_cost": Decimal(0), "external_qty": Decimal(0),
+            "pnl": Decimal(0), "sold_cost": Decimal(0), "opened": ts}
+
+
+def remove(position, quantity, what):
+    """Take `quantity` out pro rata across both origins. -> (traded, cost, external).
+
+    SPL tokens are fungible, so there is no fact about which coins moved; splitting
+    by held quantity is the only neutral choice. A full exit is handled exactly so
+    that closing a position still lands on zero rather than a rounding residue.
+    """
+    total = position["traded_qty"] + position["external_qty"]
+    if quantity - total > DUST:
+        raise ValueError(f"{what} exceeds known inventory; missing purchases or transferred tokens")
+    if total <= 0:
+        return Decimal(0), Decimal(0), Decimal(0)
+    if total - quantity < DUST:
+        traded, cost, external = (position["traded_qty"], position["traded_cost"],
+                                  position["external_qty"])
+        position["traded_qty"] = position["traded_cost"] = position["external_qty"] = Decimal(0)
+        return traded, cost, external
+    traded = quantity * position["traded_qty"] / total
+    external = quantity - traded
+    cost = (position["traded_cost"] * traded / position["traded_qty"]
+            if position["traded_qty"] > 0 else Decimal(0))
+    position["traded_qty"] -= traded
+    position["traded_cost"] -= cost
+    position["external_qty"] -= external
+    return traded, cost, external
+
+
+def analyze_ledger(data, address, network="solana", now=None, max_age_s=21600,
+                   min_history_days=30):
     now = time.time() if now is None else now
     if network != "solana" or not valid_address(address):
         raise ValueError("Wallet ranking currently requires a Solana public address")
@@ -71,13 +107,49 @@ def analyze_ledger(data, address, network="solana", now=None, max_age_s=21600):
     missing = [name for name in required if quality.get(name) is not True]
     if missing:
         raise ValueError("Unverified ledger coverage: " + ", ".join(missing))
-    if start > now - 90 * DAY:
-        raise ValueError("Need at least 90 days of complete history and earlier cost basis")
+    if start > now - min_history_days * DAY:
+        raise ValueError(f"Need at least {min_history_days} days of history and earlier cost basis")
     rows = data.get("transactions")
     if not isinstance(rows, list) or len(rows) > 50000:
         raise ValueError("Expected at most 50000 fully paginated transactions")
     positions, sales, cycles, expenses, activity, seen = {}, [], [], [], [], set()
+    external_sales, censored_cost, deployed_cost, estimated = [], Decimal(0), Decimal(0), 0
     previous = start
+
+    def token_of(row, key="token"):
+        value = row.get(key)
+        if not valid_address(value):
+            raise ValueError("Invalid token mint address")
+        return value
+
+    def close_cycle(token, ts, censored=False):
+        """End a round trip. A censored exit realised nothing observable, so it
+        contributes no win or loss even though its earlier sales still count."""
+        p = positions[token]
+        if p["sold_cost"] > 0 and not censored:
+            cycles.append({"ts": ts, "opened": p["opened"], "token": token,
+                           "pnl": p["pnl"], "cost": p["sold_cost"]})
+        p["pnl"], p["sold_cost"], p["opened"] = Decimal(0), Decimal(0), ts
+        if p["traded_qty"] <= 0 and p["external_qty"] <= 0:
+            del positions[token]
+
+    def sell_from(token, quantity, amount, fee, ts):
+        p = positions.get(token)
+        if p is None:
+            raise ValueError("Sell exceeds known inventory; missing purchases or transferred tokens")
+        traded, cost, external = remove(p, quantity, "Sell")
+        # Proceeds follow the coins: the externally sourced share is not skill.
+        traded_share = traded / quantity if quantity > 0 else Decimal(0)
+        p["pnl"] += amount * traded_share - fee * traded_share - cost
+        p["sold_cost"] += cost
+        sales.append({"ts": ts, "token": token,
+                      "pnl": amount * traded_share - fee * traded_share - cost, "cost": cost})
+        if external > 0:
+            external_share = Decimal(1) - traded_share
+            external_sales.append({"ts": ts, "pnl": amount * external_share - fee * external_share})
+        if p["traded_qty"] <= 0:
+            close_cycle(token, ts)
+
     for row in rows:
         if not isinstance(row, dict):
             raise ValueError("Each transaction must be an object")
@@ -91,43 +163,98 @@ def analyze_ledger(data, address, network="solana", now=None, max_age_s=21600):
         previous = ts
         side = row.get("side")
         fee = decimal(row.get("fee_usd"), "fee_usd")
+        if side not in TRADE_SIDES:
+            raise ValueError("Unsupported ledger row; the adapter must classify every transaction")
         if side == "fee":
             expenses.append((ts, fee))
             continue
-        # Transfers/airdrops are not zero-cost buys. Reconciliation is required
-        # before a source can produce a complete trading ledger for this wallet.
-        if side not in ("buy", "sell"):
-            raise ValueError("Unsupported transfer/airdrop/activity; reconcile cost basis before ranking")
-        token = row.get("token")
-        if not valid_address(token):
-            raise ValueError("Invalid token mint address")
-        qty = decimal(row.get("quantity"), "quantity")
-        amount = decimal(row.get("notional_usd"), "notional_usd")
-        if qty <= 0 or (side == "buy" and amount <= 0):
-            raise ValueError("Trade requires positive quantity and a known buy cost")
-        activity.append((ts, token))
-        if side == "buy":
-            if token not in positions:
-                positions[token] = {"quantity": Decimal(0), "cost": Decimal(0),
-                                    "pnl": Decimal(0), "sold_cost": Decimal(0), "opened": ts}
-            p = positions[token]
-            p["quantity"] += qty
-            p["cost"] += amount + fee
+        if side in ("buy", "sell"):
+            token = token_of(row)
+            qty = decimal(row.get("quantity"), "quantity")
+            amount = decimal(row.get("notional_usd"), "notional_usd")
+            if qty <= 0 or (side == "buy" and amount <= 0):
+                raise ValueError("Trade requires positive quantity and a known buy cost")
+            activity.append((ts, token))
+            if side == "buy":
+                p = positions.setdefault(token, new_position(ts))
+                p["traded_qty"] += qty
+                p["traded_cost"] += amount + fee
+                deployed_cost += amount + fee
+            else:
+                sell_from(token, qty, amount, fee, ts)
+        elif side in ("transfer_in", "transfer_out"):
+            token = token_of(row)
+            qty = decimal(row.get("quantity"), "quantity")
+            if qty <= 0:
+                raise ValueError("Transfer requires a positive quantity")
+            if side == "transfer_in":
+                # Arrives with no knowable basis; profit from it is tracked apart
+                # from trading skill rather than crediting a zero-cost buy.
+                positions.setdefault(token, new_position(ts))["external_qty"] += qty
+            else:
+                p = positions.get(token)
+                if p is None:
+                    raise ValueError("Transfer out exceeds known inventory")
+                traded, cost, external = remove(p, qty, "Transfer out")
+                censored_cost += cost
+                if p["traded_qty"] <= 0:
+                    close_cycle(token, ts, censored=cost > 0)
+        elif side == "swap":
+            out_token, in_token = token_of(row, "token_out"), token_of(row, "token_in")
+            out_qty = decimal(row.get("quantity_out"), "quantity_out")
+            in_qty = decimal(row.get("quantity_in"), "quantity_in")
+            if out_qty <= 0 or in_qty <= 0 or out_token == in_token:
+                raise ValueError("Swap requires two distinct tokens and positive quantities")
+            source = positions.get(out_token)
+            if source is None:
+                raise ValueError("Swap exceeds known inventory; missing purchases or transfers")
+            activity.append((ts, in_token))
+            traded, cost, external = remove(source, out_qty, "Swap")
+            # Basis carries across instead of realising at a price neither leg
+            # supplies. Total profit stays exact; only the cycle count drops.
+            share = traded / out_qty if out_qty > 0 else Decimal(0)
+            carried_pnl, carried_sold = source["pnl"], source["sold_cost"]
+            opened = source["opened"]
+            source["pnl"], source["sold_cost"] = Decimal(0), Decimal(0)
+            if source["traded_qty"] <= 0 and source["external_qty"] <= 0:
+                del positions[out_token]
+            target = positions.setdefault(in_token, new_position(opened))
+            target["traded_qty"] += in_qty * share
+            target["traded_cost"] += cost + fee
+            target["external_qty"] += in_qty * (Decimal(1) - share)
+            target["pnl"] += carried_pnl
+            target["sold_cost"] += carried_sold
+            target["opened"] = min(target["opened"], opened)
+            deployed_cost += fee
         else:
-            p = positions.get(token)
-            if p is None or qty > p["quantity"]:
-                raise ValueError("Sell exceeds known inventory; missing purchases or transferred tokens")
-            cost = p["cost"] * qty / p["quantity"]
-            pnl = amount - fee - cost
-            p["quantity"] -= qty
-            p["cost"] -= cost
-            p["pnl"] += pnl
-            p["sold_cost"] += cost
-            sales.append({"ts": ts, "token": token, "pnl": pnl, "cost": cost})
-            if p["quantity"] == 0:
-                cycles.append({"ts": ts, "opened": p["opened"], "token": token,
-                               "pnl": p["pnl"], "cost": p["sold_cost"]})
-                del positions[token]
+            legs = row.get("legs")
+            amount = decimal(row.get("notional_usd"), "notional_usd")
+            if not isinstance(legs, list) or not 2 <= len(legs) <= 50:
+                raise ValueError("A batch sell needs between 2 and 50 legs")
+            parsed = []
+            for leg in legs:
+                if not isinstance(leg, dict):
+                    raise ValueError("Each batch leg must be an object")
+                leg_token = token_of(leg)
+                leg_qty = decimal(leg.get("quantity"), "quantity")
+                if leg_qty <= 0 or leg_token not in positions:
+                    raise ValueError("Batch leg exceeds known inventory")
+                p = positions[leg_token]
+                total = p["traded_qty"] + p["external_qty"]
+                basis = (p["traded_cost"] * min(leg_qty, total) / p["traded_qty"]
+                         if p["traded_qty"] > 0 else Decimal(0))
+                parsed.append({"token": leg_token, "quantity": leg_qty, "basis": basis})
+            # One transaction, one price for several tokens: the split between them
+            # is an estimate, so it is counted and surfaced rather than hidden.
+            estimated += 1
+            weights = [leg["basis"] for leg in parsed]
+            if sum(weights) <= 0:
+                weights = [leg["quantity"] for leg in parsed]
+            total_weight = sum(weights)
+            for leg, weight in zip(parsed, weights):
+                portion = weight / total_weight if total_weight > 0 else Decimal(0)
+                activity.append((ts, leg["token"]))
+                sell_from(leg["token"], leg["quantity"], amount * portion, fee * portion, ts)
     marks = data.get("marks")
     if not isinstance(marks, list):
         raise ValueError("Explicit current inventory marks required (empty list if flat)")
@@ -141,15 +268,26 @@ def analyze_ledger(data, address, network="solana", now=None, max_age_s=21600):
         mark_ts = timestamp(mark["asof"])
         if not end - 3600 <= mark_ts <= min(end, now):
             raise ValueError("Inventory marks must be within one hour of ledger asof")
-        if decimal(mark["quantity"], "mark quantity") != positions[token]["quantity"]:
+        held = positions[token]["traded_qty"] + positions[token]["external_qty"]
+        if abs(decimal(mark["quantity"], "mark quantity") - held) > DUST:
             raise ValueError("Inventory mark quantity does not reconcile")
         mark_map[token] = decimal(mark["value_usd"], "value_usd")
     if set(mark_map) != set(positions):
         raise ValueError("Missing valuation for open inventory; do not omit losing tokens")
-    open_cost = sum((p["cost"] for p in positions.values()), Decimal(0))
-    open_pnl = sum((mark_map[t] - p["cost"] for t, p in positions.items()), Decimal(0))
+
+    def traded_value(token):
+        """The share of a mark backed by bought inventory; airdropped coins are
+        worth something but are not evidence of trading."""
+        p = positions[token]
+        total = p["traded_qty"] + p["external_qty"]
+        return mark_map[token] * p["traded_qty"] / total if total > 0 else Decimal(0)
+
+    open_cost = sum((p["traded_cost"] for p in positions.values()), Decimal(0))
+    open_pnl = sum((traded_value(t) - p["traded_cost"] for t, p in positions.items()), Decimal(0))
     # Winning open positions cannot cancel the penalty for open losers.
-    open_loss = sum((min(Decimal(0), mark_map[t] - p["cost"]) for t, p in positions.items()), Decimal(0))
+    open_loss = sum((min(Decimal(0), traded_value(t) - p["traded_cost"])
+                     for t, p in positions.items()), Decimal(0))
+    open_external_value = sum((mark_map[t] - traded_value(t) for t in positions), Decimal(0))
     windows = {}
     for days in (7, 30, 90):
         cutoff = now - days * DAY
@@ -198,19 +336,29 @@ def analyze_ledger(data, address, network="solana", now=None, max_age_s=21600):
             "without_best_token_roi": ratio(pnl - best_data["pnl"], cost - best_data["cost"]),
             "inventory_stressed_roi": ratio(pnl + open_loss, cost + open_cost),
             "standalone_fees_usd": float(standalone_fees),
+            "external_origin_pnl_usd": float(sum((s["pnl"] for s in external_sales
+                                                  if s["ts"] >= cutoff), Decimal(0))),
         }
     return {"address": address, "network": network, "asof": end, "source": source,
-            "coverage": quality, "accounting": "moving_weighted_average_after_fees",
+            "coverage": quality, "accounting": "origin_split_moving_weighted_average_after_fees",
             "open_cost_usd": float(open_cost), "unrealized_pnl_usd": float(open_pnl),
-            "open_loss_usd": float(open_loss), "open_tokens": len(positions), "windows": windows}
+            "open_loss_usd": float(open_loss), "open_tokens": len(positions),
+            "open_external_value_usd": float(open_external_value),
+            "censored_cost_usd": float(censored_cost),
+            "censored_cost_fraction": ratio(censored_cost, deployed_cost) or 0.0,
+            "estimated_allocation_rows": estimated,
+            "external_origin_pnl_note": "Profit from transferred-in inventory, excluded from cost_roi and cycles",
+            "windows": windows}
 
 
 WALLET_FLAGS = ("insufficient_independent_sample", "profit_concentrated_in_one_token",
-                "not_profitable_without_best_token", "realized_profit_does_not_cover_open_losses")
-BLOCKING_FLAGS = ("insufficient_independent_sample", "realized_profit_does_not_cover_open_losses")
+                "not_profitable_without_best_token", "realized_profit_does_not_cover_open_losses",
+                "record_materially_censored", "allocation_estimated")
+BLOCKING_FLAGS = ("insufficient_independent_sample", "realized_profit_does_not_cover_open_losses",
+                  "record_materially_censored")
 
 
-def rank_wallets(analyses, min_cycles=10, min_tokens=3):
+def rank_wallets(analyses, min_cycles=10, min_tokens=3, max_censored_fraction=.25):
     results = []
     for item in analyses:
         result = dict(item)
@@ -227,6 +375,12 @@ def rank_wallets(analyses, min_cycles=10, min_tokens=3):
         # genuinely profitable one, so insolvency cannot be a cosmetic annotation.
         if m["realized_pnl_usd"] + item["open_loss_usd"] <= 0:
             flags.append("realized_profit_does_not_cover_open_losses")
+        # Inventory moved out is an outcome nobody can observe. A little is normal
+        # housekeeping; a lot means the record simply does not show what happened.
+        if item["censored_cost_fraction"] > max_censored_fraction:
+            flags.append("record_materially_censored")
+        if item["estimated_allocation_rows"]:
+            flags.append("allocation_estimated")
         confidence = (m["closed_cycles"] / (m["closed_cycles"] + 20)
                       * min(1, m["closed_tokens"] / 8) ** .5
                       * min(1, m["active_weeks"] / 6) ** .5)

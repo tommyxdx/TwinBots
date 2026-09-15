@@ -112,30 +112,45 @@ def quote_usd(row, price_usd):
 
 
 def classify(row, quote_value):
-    """-> (side, mint, quantity, notional_usd); notional_usd is positive.
+    """-> (side, payload); every side the ledger schema understands is reachable.
 
-    'skip' means the transaction cannot affect token cost accounting at all.
-    'unsupported' means it could, but its cost basis is unknowable from deltas.
+    Nothing about a wallet's ordinary life is rejected outright any more: what
+    the deltas cannot price is recorded in a form the accounting can hold open
+    without inventing a cost basis for it.
     """
     if row["failed"]:
         # A failed attempt still costs gas and belongs to the strategy's cost.
-        return ("fee", None, None, None) if row["fee_sol"] > 0 else ("skip", None, None, None)
+        return ("fee", {}) if row["fee_sol"] > 0 else ("skip", {})
     traded = row["tokens"]
     if not traded:
         # Quote-asset movement only: deposits, withdrawals, unrelated activity.
         # None of it enters token cost accounting, so it is skipped, not rejected.
-        return "skip", None, None, None
-    if len(traded) > 1:
-        # Token-for-token swaps need a USD price for a research asset, which
-        # quote-leg deltas cannot supply. Reported rather than guessed.
-        return "unsupported", "multi_token_transaction", None, None
-    mint, quantity = next(iter(traded.items()))
-    if quantity > 0 and quote_value < 0:
-        return "buy", mint, quantity, -quote_value
-    if quantity < 0 and quote_value > 0:
-        return "sell", mint, -quantity, quote_value
-    # Tokens moved with no matching quote leg: transfer in/out, airdrop or LP.
-    return "unsupported", "transfer_or_airdrop", None, None
+        return "skip", {}
+    incoming = {m: q for m, q in traded.items() if q > 0}
+    outgoing = {m: -q for m, q in traded.items() if q < 0}
+    priced = abs(quote_value) > DUST
+    if len(traded) == 1:
+        mint, quantity = next(iter(traded.items()))
+        if quantity > 0:
+            if quote_value < 0:
+                return "buy", {"token": mint, "quantity": quantity, "notional_usd": -quote_value}
+            # Arrived without payment: airdrop, or a transfer from another wallet.
+            return "transfer_in", {"token": mint, "quantity": quantity}
+        if quote_value > 0:
+            return "sell", {"token": mint, "quantity": -quantity, "notional_usd": quote_value}
+        return "transfer_out", {"token": mint, "quantity": -quantity}
+    if len(incoming) == 1 and len(outgoing) == 1 and not priced:
+        # Token for token. Basis carries across, so no price is needed.
+        (in_mint, in_qty), (out_mint, out_qty) = next(iter(incoming.items())), next(iter(outgoing.items()))
+        return "swap", {"token_out": out_mint, "quantity_out": out_qty,
+                        "token_in": in_mint, "quantity_in": in_qty}
+    if outgoing and not incoming and quote_value > 0:
+        # Several positions closed at one price; the split between them is an estimate.
+        return "batch_sell", {"legs": [{"token": m, "quantity": q} for m, q in sorted(outgoing.items())],
+                              "notional_usd": quote_value}
+    # Several tokens acquired at one price, or a mixed multi-leg transaction:
+    # there is no defensible key to allocate cost across the incoming legs.
+    return "unsupported", {"reason": "unallocatable_multi_token_transaction"}
 
 
 def ledger_rows(entries, address, price_usd):
@@ -146,18 +161,18 @@ def ledger_rows(entries, address, price_usd):
     rows, rejected = [], []
     for row in sorted((normalize(e, address) for e in entries),
                       key=lambda r: (r["ts"], r["slot"], r["order"])):
-        side, mint, quantity, notional = classify(row, quote_usd(row, price_usd))
+        side, payload = classify(row, quote_usd(row, price_usd))
         if side == "skip":
             continue
         if side == "unsupported":
-            rejected.append({"signature": row["signature"], "ts": row["ts"], "reason": mint})
+            rejected.append({"signature": row["signature"], "ts": row["ts"],
+                             "reason": payload["reason"]})
             continue
-        fee_usd = row["fee_sol"] * price_usd(SOL_MINT, row["ts"])
-        if side == "fee":
-            rows.append({"id": row["signature"] + ":fee", "ts": row["ts"], "side": "fee",
-                         "fee_usd": str(fee_usd)})
-            continue
-        rows.append({"id": row["signature"] + ":0", "ts": row["ts"], "side": side,
-                     "token": mint, "quantity": str(quantity),
-                     "notional_usd": str(notional), "fee_usd": str(fee_usd)})
+        entry = {"id": row["signature"] + (":fee" if side == "fee" else ":0"),
+                 "ts": row["ts"], "side": side,
+                 "fee_usd": str(row["fee_sol"] * price_usd(SOL_MINT, row["ts"]))}
+        for key, value in payload.items():
+            entry[key] = ([{"token": leg["token"], "quantity": str(leg["quantity"])}
+                           for leg in value] if key == "legs" else str(value))
+        rows.append(entry)
     return rows, rejected

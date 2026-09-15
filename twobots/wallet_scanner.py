@@ -84,7 +84,8 @@ class WalletScanner:
             state = {"attempted_at": now}
             try:
                 ledger = self.read_ledger(address)
-                analyze_ledger(ledger, address, self.network, now, self.c["max_age_s"])
+                analyze_ledger(ledger, address, self.network, now, self.c["max_age_s"],
+                               self.c["min_history_days"])
                 state["ledger"] = ledger
             except FileNotFoundError:
                 state["error"] = "No local ledger; supply complete historical data for this address"
@@ -106,12 +107,14 @@ class WalletScanner:
                                     "reason": state.get("error", "Pending bounded refresh")})
                 continue
             try:
-                analyses.append(analyze_ledger(state["ledger"], address, self.network, now, self.c["max_age_s"]))
+                analyses.append(analyze_ledger(state["ledger"], address, self.network, now,
+                                               self.c["max_age_s"], self.c["min_history_days"]))
             except (ValueError, KeyError, TypeError) as exc:
                 unavailable.append({"address": address, "status": "unavailable", "reason": str(exc)})
         result = {"generated_at": now, "network": self.network, "kind": "wallets",
                   "source_mode": self.c["source"], "candidate_count": len(addresses),
-                  "ranking": rank_wallets(analyses, self.c["min_closed_cycles"], self.c["min_closed_tokens"]),
+                  "ranking": rank_wallets(analyses, self.c["min_closed_cycles"], self.c["min_closed_tokens"],
+                                          self.c["max_censored_cost_fraction"]),
                   "unavailable": unavailable,
                   "note": "Historical research only. Provider coverage is not independently verified. A rank is not evidence that copying the wallet is profitable.",
                   "discovery_note": "Recent pool senders are candidates, not verified beneficial owners or a full-chain sample"}

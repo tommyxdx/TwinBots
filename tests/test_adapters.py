@@ -114,22 +114,62 @@ def test_quote_asset_deposit_is_skipped_not_rejected():
     assert rows == [] and rejected == []
 
 
-def test_token_arriving_without_payment_is_rejected():
+def test_token_arriving_without_payment_becomes_a_transfer_in():
+    """An unsolicited airdrop is ordinary. It gets no cost basis, not a rejection."""
     e = entry("s7", 1_700_000_000, fee=0,
               pre=[balance(2, BONK, WALLET, 0, 9)],
               post=[balance(2, BONK, WALLET, 10_000 * 10 ** 9, 9)])
     rows, rejected = ledger_rows([e], WALLET, price_usd)
-    assert rows == []
-    assert rejected[0]["reason"] == "transfer_or_airdrop"
+    assert rejected == []
+    assert rows[0]["side"] == "transfer_in"
+    assert Decimal(rows[0]["quantity"]) == 10_000
+    assert "notional_usd" not in rows[0]
 
 
-def test_token_for_token_swap_is_rejected():
+def test_token_leaving_without_payment_becomes_a_transfer_out():
+    e = entry("s7b", 1_700_000_000, fee=0,
+              pre=[balance(2, BONK, WALLET, 500 * 10 ** 9, 9)],
+              post=[balance(2, BONK, WALLET, 0, 9)])
+    rows, rejected = ledger_rows([e], WALLET, price_usd)
+    assert rejected == []
+    assert rows[0]["side"] == "transfer_out"
+    assert Decimal(rows[0]["quantity"]) == 500
+
+
+def test_token_for_token_swap_carries_basis_instead_of_rejecting():
     e = entry("s8", 1_700_000_000, fee=0,
               pre=[balance(2, BONK, WALLET, 1000 * 10 ** 9, 9), balance(3, WIF, WALLET, 0, 9)],
               post=[balance(2, BONK, WALLET, 0, 9), balance(3, WIF, WALLET, 5 * 10 ** 9, 9)])
     rows, rejected = ledger_rows([e], WALLET, price_usd)
+    assert rejected == []
+    assert rows[0]["side"] == "swap"
+    assert rows[0]["token_out"] == BONK and Decimal(rows[0]["quantity_out"]) == 1000
+    assert rows[0]["token_in"] == WIF and Decimal(rows[0]["quantity_in"]) == 5
+
+
+def test_several_positions_closed_at_one_price_become_a_batch_sell():
+    e = entry("s8b", 1_700_000_000, fee=0,
+              pre=[balance(1, USDC, WALLET, 0), balance(2, BONK, WALLET, 1000 * 10 ** 9, 9),
+                   balance(3, WIF, WALLET, 5 * 10 ** 9, 9)],
+              post=[balance(1, USDC, WALLET, 900_000_000), balance(2, BONK, WALLET, 0, 9),
+                    balance(3, WIF, WALLET, 0, 9)])
+    rows, rejected = ledger_rows([e], WALLET, price_usd)
+    assert rejected == []
+    assert rows[0]["side"] == "batch_sell"
+    assert Decimal(rows[0]["notional_usd"]) == 900
+    assert sorted(leg["token"] for leg in rows[0]["legs"]) == sorted([BONK, WIF])
+
+
+def test_several_tokens_bought_at_one_price_stay_unsupported():
+    """Cost has no defensible allocation key across incoming legs."""
+    e = entry("s8c", 1_700_000_000, fee=0,
+              pre=[balance(1, USDC, WALLET, 900_000_000), balance(2, BONK, WALLET, 0, 9),
+                   balance(3, WIF, WALLET, 0, 9)],
+              post=[balance(1, USDC, WALLET, 0), balance(2, BONK, WALLET, 1000 * 10 ** 9, 9),
+                    balance(3, WIF, WALLET, 5 * 10 ** 9, 9)])
+    rows, rejected = ledger_rows([e], WALLET, price_usd)
     assert rows == []
-    assert rejected[0]["reason"] == "multi_token_transaction"
+    assert rejected[0]["reason"] == "unallocatable_multi_token_transaction"
 
 
 def test_other_owners_balances_are_ignored():
@@ -314,8 +354,8 @@ def clean_history(now, count=15):
     return entries
 
 
-def test_build_reports_an_unusable_wallet_instead_of_raising():
-    """One unsolicited airdrop is enough, and the report has to say so."""
+def test_an_airdrop_no_longer_blocks_the_wallet():
+    """Spam arrives unasked. It must not cost a wallet its eligibility."""
     import time
     from adapters.ledger import build
     now = time.time()
@@ -324,11 +364,90 @@ def test_build_reports_an_unusable_wallet_instead_of_raising():
                          pre=[balance(5, POPCAT, WALLET, 0, 9)],
                          post=[balance(5, POPCAT, WALLET, 10 ** 15, 9)]))
     ledger, report = build(WALLET, FakeHelius(entries), FakeSolPrice(), now=now, quote_marks=False)
+    assert report["usable"] is True
+    assert report["rows_by_side"]["transfer_in"] == 1
+    # The airdrop is open inventory, marked at zero because nothing was quoted.
+    assert [m["token"] for m in ledger["marks"]] == [POPCAT]
+    result = analyze_ledger(ledger, WALLET, "solana", now)
+    assert result["windows"]["90"]["closed_cycles"] == 15
+    assert result["open_tokens"] == 1
+
+
+def test_an_ordinary_agent_wallet_now_ranks():
+    """Airdrops, a self-transfer, a token swap, a batch exit and a 40-day history.
+
+    Every one of these used to disqualify the wallet outright. Together they are
+    what an active agent's address actually looks like.
+    """
+    import time
+    from adapters.ledger import build
+    from twobots.wallets import rank_wallets
+    now = time.time()
+    entries = [entry("genesis", int(now - 40 * DAY), pre=[balance(1, USDC, WALLET, 0)],
+                     post=[balance(1, USDC, WALLET, 200_000_000_000)])]
+    for i in range(12):
+        ts = int(now - 38 * DAY + i * 2 * DAY)
+        token = [BONK, WIF, POPCAT][i % 3]
+        entries.append(usdc_swap(f"b{i}", ts, token, 1000, -500, slot=100 + i))
+        entries.append(usdc_swap(f"s{i}", ts + 3600, token, -1000, 500 + (400 if i % 3 == 0 else -100),
+                                 slot=200 + i))
+    spare = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"
+    # Unsolicited airdrop, then dumped: profit, but not trading skill.
+    entries.append(entry("drop", int(now - 12 * DAY), fee=0, pre=[balance(5, spare, WALLET, 0, 9)],
+                         post=[balance(5, spare, WALLET, 10 ** 12, 9)]))
+    entries.append(usdc_swap("dump", int(now - 11 * DAY), spare, -1000, 300, slot=500))
+    # Buy BONK, rotate it into WIF, then exit both together at one price.
+    entries.append(usdc_swap("rot_in", int(now - 9 * DAY), BONK, 800, -400, slot=600))
+    entries.append(entry("rotate", int(now - 8 * DAY), fee=0,
+                         pre=[balance(2, BONK, WALLET, 800 * 10 ** 9, 9),
+                              balance(3, WIF, WALLET, 0, 9)],
+                         post=[balance(2, BONK, WALLET, 0, 9),
+                               balance(3, WIF, WALLET, 6 * 10 ** 9, 9)]))
+    entries.append(usdc_swap("keep", int(now - 7 * DAY), POPCAT, 200, -300, slot=700))
+    entries.append(entry("consolidate", int(now - 6 * DAY), fee=0,
+                         pre=[balance(1, USDC, WALLET, 0), balance(3, WIF, WALLET, 6 * 10 ** 9, 9),
+                              balance(4, POPCAT, WALLET, 200 * 10 ** 9, 9)],
+                         post=[balance(1, USDC, WALLET, 900_000_000),
+                               balance(3, WIF, WALLET, 0, 9),
+                               balance(4, POPCAT, WALLET, 0, 9)]))
+    # Moving a position to another of my own wallets: small share of deployed cost.
+    entries.append(usdc_swap("cold_buy", int(now - 5 * DAY), BONK, 100, -200, slot=800))
+    entries.append(entry("cold", int(now - 4 * DAY), fee=0,
+                         pre=[balance(2, BONK, WALLET, 100 * 10 ** 9, 9)],
+                         post=[balance(2, BONK, WALLET, 0, 9)]))
+
+    ledger, report = build(WALLET, FakeHelius(entries), FakeSolPrice(), now=now, quote_marks=False)
+    assert report["usable"] is True, report
+    sides = report["rows_by_side"]
+    assert sides["transfer_in"] == 1 and sides["transfer_out"] == 1
+    assert sides["swap"] == 1 and sides["batch_sell"] == 1
+
+    result = rank_wallets([analyze_ledger(ledger, WALLET, "solana", now)])[0]
+    assert result["status"] == "ranked" and result["score"] is not None
+    # The airdrop's 300 less its own gas is reported, but kept out of the trading numbers.
+    assert result["windows"]["90"]["external_origin_pnl_usd"] == float(
+        300 - Decimal(5000) / 10 ** 9 * SOL_USD)
+    assert 0 < result["censored_cost_fraction"] < .25
+    assert "record_materially_censored" not in result["flags"]
+    assert "allocation_estimated" in result["flags"]
+
+
+def test_build_reports_an_unusable_wallet_instead_of_raising():
+    import time
+    from adapters.ledger import build
+    now = time.time()
+    entries = clean_history(now)
+    entries.append(entry("multibuy", int(now - 30 * DAY), fee=0,
+                         pre=[balance(1, USDC, WALLET, 900_000_000),
+                              balance(5, POPCAT, WALLET, 0, 9), balance(6, WIF, WALLET, 0, 9)],
+                         post=[balance(1, USDC, WALLET, 0),
+                               balance(5, POPCAT, WALLET, 10 ** 12, 9),
+                               balance(6, WIF, WALLET, 10 ** 12, 9)]))
+    ledger, report = build(WALLET, FakeHelius(entries), FakeSolPrice(), now=now, quote_marks=False)
     assert ledger is None
     assert report["usable"] is False
     assert report["blocked_by"] == "unreconstructable_cost_basis"
-    assert report["reasons"] == {"transfer_or_airdrop": 1}
-    assert report["trade_rows"] == 30
+    assert report["reasons"] == {"unallocatable_multi_token_transaction": 1}
 
 
 def test_build_produces_a_ledger_the_ranking_accepts():
@@ -342,14 +461,14 @@ def test_build_produces_a_ledger_the_ranking_accepts():
     assert result["windows"]["90"]["closed_cycles"] == 15
 
 
-def test_build_reports_short_history_without_spending_on_marks():
+def test_build_reports_short_history():
     import time
     from adapters.ledger import build
     now = time.time()
     entries = [usdc_swap("b0", int(now - 10 * DAY), BONK, 1000, -500)]
     ledger, report = build(WALLET, FakeHelius(entries), FakeSolPrice(), now=now, quote_marks=False)
     assert ledger is None
-    assert report["blocked_by"] == "history_shorter_than_90_days"
+    assert report["blocked_by"] == "history_shorter_than_30_days"
     assert report["history_days"] == 10
 
 

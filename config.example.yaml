@@ -77,8 +77,13 @@ wallets:
   refresh_s: 21600
   max_age_s: 21600
   max_ledger_mb: 10
+  # Shorter histories are not refused, only down-weighted by the sample term.
+  min_history_days: 30
   min_closed_cycles: 10
   min_closed_tokens: 3
+  # Inventory transferred out is an outcome nobody can observe. Above this share
+  # of deployed cost the record no longer shows what the wallet actually did.
+  max_censored_cost_fraction: 0.25
 follow:
   # Copy trading from the ranked wallets. Paper only; nothing is signed or broadcast.
   enabled: false
