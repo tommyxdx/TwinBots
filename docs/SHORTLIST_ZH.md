@@ -63,8 +63,13 @@ python -m twobots shortlist --probe "https://public-api.birdeye.so/<接口路径
 ```json
 {
   "top_level_keys": ["data", "success"],
-  "address_path_candidates": {"data.items[].address": 10},
-  "next": "Put the path with the most addresses in address_path"
+  "wallet_path_candidates": {"data.items[].owner": 5},
+  "not_wallets": {
+    "data.items[].quote.address": 5,
+    "data.items[].base.address": 5,
+    "data.items[].poolId": 5
+  },
+  "next": "Use a wallet_path_candidates entry; confirm the field means a trader, not a token or pool"
 }
 ```
 
@@ -155,6 +160,10 @@ python -m twobots shortlist --probe "https://public-api.birdeye.so/<接口路径
 
 ## 我实测到什么程度
 
-Dune 的缓存结果端点按官方文档实现（URL、header、`result.rows` 结构已核对）。取值路径、合并去重、缺 Key 跳过、报错隔离、Key 不泄露、文件源的四种格式，都有离线测试覆盖，并用真实配置跑通了 `twobots shortlist`。
+**已用真实 Key 实测**：Birdeye 的三个接口（上表）全部返回 200，`--probe` 在真实响应上正确分出了钱包字段和代币/池子字段。
 
-**没有实测**：Dune / Birdeye / Solscan 的真实响应（我没有这些平台的账号和 Key）。所以每接一个源，先 `python -m twobots shortlist` 看一次输出再开着跑。
+**按官方文档实现但未实测**：Dune 的缓存结果端点（URL、header、`result.rows` 结构已核对，但我没有 Dune 账号）。Solscan Pro 同理。
+
+取值路径、钱包/代币分栏、合并去重、缺 Key 跳过、报错隔离、Key 不泄露、文件源的四种格式，都有离线测试覆盖。
+
+**每接一个新源，先 `--probe` 一次再写进配置**——文档会过时，套餐权限也因账号而异，打一次接口是唯一可靠的确认方式。
