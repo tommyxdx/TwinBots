@@ -6,7 +6,7 @@
 
 本版提供本地 JSON 导入与通用只读 GET 适配器，**没有直接把 Birdeye/Helius 原始响应转成完整账本的供应商实现**。未提供账本时可发现地址，但输出 `unavailable`，不会产生真实排行榜。不能将供应商 PnL 汇总 URL 直接填入 `wallets.url_template`。
 
-钱包排名不训练模型，不使用 LLM，不触发 CEX 或 DEX 跟单，不签名、不广播。CEX 原模拟策略独立保留。钱包模式要求 `dex.enabled: false`；旧代币扫描及对应 DEX paper 可通过明确设置 `scanner.kind: tokens` 使用。
+钱包排名不训练模型，不使用 LLM，不签名、不广播。CEX 原模拟策略独立保留。钱包模式要求 `dex.enabled: false`（那是旧的按代币评分的 DEX paper，可通过明确设置 `scanner.kind: tokens` 使用）；跟单走 `follow.enabled`，需要另一份近实时成交流，见 [COPY_TRADING.md](COPY_TRADING.md)。
 
 ## 零 API 验证与本地运行
 

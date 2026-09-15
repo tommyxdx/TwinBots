@@ -70,9 +70,11 @@ class QuoteGateway:
 
 
 class DexPaper:
-    def __init__(self,cfg,store,gateway):
-        self.cfg,self.c,self.store,self.gateway = cfg,cfg["dex"],store,gateway
-        self.ledger = Ledger(store,"dex",self.c["initial_cash"])
+    venue = "dex"
+
+    def __init__(self,cfg,store,gateway,params=None):
+        self.cfg,self.c,self.store,self.gateway = cfg,params or cfg["dex"],store,gateway
+        self.ledger = Ledger(store,self.venue,self.c["initial_cash"])
         self.rng = random.Random(cfg["runtime"]["random_seed"]+1)
         self.next_mark = 0
 
@@ -83,7 +85,15 @@ class DexPaper:
         return int(Decimal(str(usd))/Decimal(str(self.c["quote_usd"]))*10**self.c["quote_decimals"])
 
     async def quote(self,a,b,amount):
-        return await asyncio.to_thread(self.gateway.quote,a,b,amount)
+        # StopIteration cannot be set on a Future, so letting one escape the worker
+        # leaves this await pending forever with the order stuck in SUBMITTED, which
+        # blocks every later order on the venue.
+        def call():
+            try:
+                return self.gateway.quote(a,b,amount)
+            except StopIteration as exc:
+                raise RuntimeError("Quote source raised StopIteration") from exc
+        return await asyncio.to_thread(call)
 
     async def swap(self,token,side,amount,reason,prepared=None):
         stable = self.c["quote_token"]
@@ -136,7 +146,7 @@ class DexPaper:
             if p["raw_qty"]==0:
                 del state["positions"][token]
         result = self.ledger.finalize(order,"FILLED",state)
-        LOG.info("PAPER DEX %s %s: FILLED",side,token)
+        LOG.info("PAPER %s %s %s: FILLED",self.venue.upper(),side,token)
         return result
 
     async def entry(self,scan):
@@ -176,7 +186,7 @@ class DexPaper:
                 if stop or trailing or expired:
                     await self.swap(token,"SELL",int(p["raw_qty"]),"stop" if stop else ("trailing" if trailing else "time_exit"),q)
             except Exception as exc:
-                self.store.event("dex_mark_unavailable",{"token":token,"type":type(exc).__name__})
+                self.store.event(self.venue+"_mark_unavailable",{"token":token,"type":type(exc).__name__})
         state = self.ledger.state()
         values,stale = {},[]
         for token,p in state["positions"].items():
@@ -236,7 +246,7 @@ class DexPaper:
             try:
                 await self.step()
             except Exception as exc:
-                LOG.warning("DEX paper loop error: %s",exc)
-                self.store.event("dex_error",{"type":type(exc).__name__})
+                LOG.warning("%s paper loop error: %s",self.venue.upper(),exc)
+                self.store.event(self.venue+"_error",{"type":type(exc).__name__})
                 self.ledger.recover()
             await asyncio.sleep(self.c["poll_s"])

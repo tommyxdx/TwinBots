@@ -47,7 +47,7 @@ def load_config(path="config.yaml"):
     w = cfg["wallets"] = {**defaults, **cfg.get("wallets", {})}
     if w["source"] not in ("local", "adapter") or type(w["discover_enabled"]) is not bool:
         raise ValueError("Invalid wallet source/discovery configuration")
-    from .wallets import valid_address
+    from .wallets import BLOCKING_FLAGS, WALLET_FLAGS, valid_address
     if not isinstance(w["addresses"], list) or any(not valid_address(a) for a in w["addresses"]):
         raise ValueError("wallets.addresses must be a list of Solana public addresses")
     for key in ("discovery_every_s", "discovery_max_pools", "discovery_addresses_per_pool", "max_candidates",
@@ -61,7 +61,40 @@ def load_config(path="config.yaml"):
         if cfg["scanner"]["network"] != "solana":
             raise ValueError("Wallet ledger accounting currently supports Solana only")
         if cfg["dex"]["enabled"]:
-            raise ValueError("Wallet ranking is research only: keep dex.enabled false; copy trading is not implemented")
+            raise ValueError("Wallet mode uses follow.enabled for copy trading; keep dex.enabled false")
+    follow_defaults = {"enabled": False, "source": "local", "activity_dir": "wallet_activity",
+                       "url_template": "", "api_key_env": "WALLET_ACTIVITY_API_KEY",
+                       "header": "Authorization", "header_prefix": "Bearer ",
+                       "max_leaders": 3, "min_score": 10.0, "allowed_flags": [],
+                       "ranking_max_age_s": 21600, "max_feed_age_s": 300, "max_signal_age_s": 120,
+                       "min_leader_notional_usd": 50.0, "seen_memory": 5000, "cooldown_s": 3600,
+                       "mirror_exits": True, "max_activity_mb": 4,
+                       "initial_cash": 100, "ticket_usd": 2, "max_positions": 3,
+                       "max_drawdown": 0.10, "max_hold_hours": 24, "stop_fraction": 0.25,
+                       "trail_fraction": 0.30, "poll_s": 60, "mark_every_s": 300}
+    f = cfg["follow"] = {**follow_defaults, **cfg.get("follow", {})}
+    if f["source"] not in ("local", "adapter") or type(f["enabled"]) is not bool or type(f["mirror_exits"]) is not bool:
+        raise ValueError("Invalid follow source/enabled/mirror_exits configuration")
+    if f["enabled"] and cfg["scanner"]["kind"] != "wallets":
+        raise ValueError("follow.enabled requires scanner.kind: wallets to produce a ranking")
+    for key in ("max_leaders", "ranking_max_age_s", "max_feed_age_s", "max_signal_age_s",
+                "seen_memory", "cooldown_s", "max_activity_mb", "max_positions",
+                "max_hold_hours", "poll_s", "mark_every_s"):
+        if type(f[key]) is not int or f[key] <= 0:
+            raise ValueError(f"follow.{key} must be a positive integer")
+    if not isinstance(f["allowed_flags"], list) or not set(f["allowed_flags"]) <= set(WALLET_FLAGS):
+        raise ValueError("follow.allowed_flags must be a subset of " + ", ".join(WALLET_FLAGS))
+    if set(f["allowed_flags"]) & set(BLOCKING_FLAGS):
+        raise ValueError("follow.allowed_flags cannot re-admit a flag that blocks ranking")
+    if f["initial_cash"] <= 0 or f["ticket_usd"] <= 0 or f["min_leader_notional_usd"] < 0:
+        raise ValueError("Invalid follow capital/ticket/notional configuration")
+    if not 0 < f["max_drawdown"] < 1 or not 0 < f["stop_fraction"] < 1 or not 0 < f["trail_fraction"] < 1:
+        raise ValueError("Invalid follow drawdown/stop/trailing fraction")
+    if f["max_activity_mb"] > 64 or f["max_leaders"] > 50:
+        raise ValueError("Follow activity/leader limits exceeded")
+    if f["max_signal_age_s"] > f["max_feed_age_s"]:
+        raise ValueError("follow.max_signal_age_s cannot exceed follow.max_feed_age_s")
+    f["activity_dir"] = str((path.parent / f["activity_dir"]).resolve())
     root = Path(cfg["data_dir"])
     cfg["data_dir"] = str((path.parent / root).resolve())
     Path(cfg["data_dir"]).mkdir(parents=True, exist_ok=True)

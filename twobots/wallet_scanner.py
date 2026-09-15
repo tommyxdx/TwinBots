@@ -78,7 +78,7 @@ class WalletScanner:
         due = [a for a in addresses if now - states[a].get("attempted_at", 0) >= self.c["refresh_s"]]
         # For local inputs no API is consumed, and edits can be checked immediately.
         if self.c["source"] == "local":
-            due = addresses
+            due = list(addresses)
         due.sort(key=lambda a: (states[a].get("attempted_at", 0), a))
         for address in due[:self.c["max_wallets_per_run"]]:
             state = {"attempted_at": now}
@@ -113,7 +113,7 @@ class WalletScanner:
                   "source_mode": self.c["source"], "candidate_count": len(addresses),
                   "ranking": rank_wallets(analyses, self.c["min_closed_cycles"], self.c["min_closed_tokens"]),
                   "unavailable": unavailable,
-                  "note": "Historical research only. Provider coverage is not independently verified. No automatic copy trades.",
+                  "note": "Historical research only. Provider coverage is not independently verified. A rank is not evidence that copying the wallet is profitable.",
                   "discovery_note": "Recent pool senders are candidates, not verified beneficial owners or a full-chain sample"}
         self.store.set("wallet:latest", result)
         self.store.set("heartbeat:scanner", now)

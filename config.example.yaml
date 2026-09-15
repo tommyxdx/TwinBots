@@ -79,6 +79,41 @@ wallets:
   max_ledger_mb: 10
   min_closed_cycles: 10
   min_closed_tokens: 3
+follow:
+  # Copy trading from the ranked wallets. Paper only; nothing is signed or broadcast.
+  enabled: false
+  # local: <activity_dir>/<Solana address>.json, schema in docs/COPY_TRADING.md.
+  # adapter: trusted GET endpoint returning that same recent-fill schema.
+  source: local
+  activity_dir: wallet_activity
+  url_template: ""  # Optional {network} and {address}.
+  api_key_env: WALLET_ACTIVITY_API_KEY
+  header: Authorization
+  header_prefix: "Bearer "
+  max_leaders: 3
+  min_score: 10
+  # Flags that still admit a leader. Empty means only unflagged wallets are copied;
+  # ranking already refuses insufficient samples and wallets down on open inventory.
+  allowed_flags: []
+  ranking_max_age_s: 21600
+  # Feed staleness, then per-fill copy lag. A fill older than this is never entered.
+  max_feed_age_s: 300
+  max_signal_age_s: 120
+  min_leader_notional_usd: 50
+  seen_memory: 5000
+  cooldown_s: 3600
+  mirror_exits: true
+  max_activity_mb: 4
+  # Separate hypothetical account; venue costs are taken from the dex section.
+  initial_cash: 100
+  ticket_usd: 2
+  max_positions: 3
+  max_drawdown: 0.10
+  max_hold_hours: 24
+  stop_fraction: 0.25
+  trail_fraction: 0.30
+  poll_s: 60
+  mark_every_s: 300
 telegram:
   enabled: false
   token_env: TELEGRAM_BOT_TOKEN

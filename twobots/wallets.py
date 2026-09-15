@@ -205,6 +205,11 @@ def analyze_ledger(data, address, network="solana", now=None, max_age_s=21600):
             "open_loss_usd": float(open_loss), "open_tokens": len(positions), "windows": windows}
 
 
+WALLET_FLAGS = ("insufficient_independent_sample", "profit_concentrated_in_one_token",
+                "not_profitable_without_best_token", "realized_profit_does_not_cover_open_losses")
+BLOCKING_FLAGS = ("insufficient_independent_sample", "realized_profit_does_not_cover_open_losses")
+
+
 def rank_wallets(analyses, min_cycles=10, min_tokens=3):
     results = []
     for item in analyses:
@@ -217,6 +222,9 @@ def rank_wallets(analyses, min_cycles=10, min_tokens=3):
             flags.append("profit_concentrated_in_one_token")
         if m["without_best_token_pnl_usd"] <= 0:
             flags.append("not_profitable_without_best_token")
+        # Realising winners while holding losers raises cost_roi, which carries most
+        # of the score. Without a hard gate a wallet that is net down outranks a
+        # genuinely profitable one, so insolvency cannot be a cosmetic annotation.
         if m["realized_pnl_usd"] + item["open_loss_usd"] <= 0:
             flags.append("realized_profit_does_not_cover_open_losses")
         confidence = (m["closed_cycles"] / (m["closed_cycles"] + 20)
@@ -228,7 +236,7 @@ def rank_wallets(analyses, min_cycles=10, min_tokens=3):
         # A penalty can only reduce a positive score, never improve a loser.
         concentration = 1 - .7 * (m["best_token_profit_share"] or 0)
         score = 100 * confidence * (edge * concentration if edge > 0 else edge)
-        eligible = "insufficient_independent_sample" not in flags and m["cost_roi"] is not None
+        eligible = not any(f in BLOCKING_FLAGS for f in flags) and m["cost_roi"] is not None
         result.update(score=round(score, 6) if eligible else None, sample_weight=round(confidence, 6),
                       status="ranked" if eligible else "observation", flags=flags,
                       score_meaning="Unvalidated historical research priority, not profit probability")

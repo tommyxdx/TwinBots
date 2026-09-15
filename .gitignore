@@ -11,3 +11,5 @@ adapter.local.json
 audit_demo/
 wallet_ledgers/
 wallet_demo_output/
+wallet_activity/
+copy_demo_output/

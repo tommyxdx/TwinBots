@@ -212,6 +212,15 @@ class DexTests(Base):
         self.assertEqual(result["settled_status"],"UNVERIFIABLE_NO_EXECUTION")
         self.assertEqual(d.ledger.state()["cash"],100)
 
+    def test_exhausted_quote_source_does_not_strand_the_order(self):
+        """StopIteration cannot be set on a Future: an escaping one would leave the
+        await pending forever and block every later order on the venue."""
+        d=self.engine([1000])
+        asyncio.run(d.swap("TOKEN","BUY",2_000_000,"test"))
+        self.assertFalse(d.ledger.pending())
+        d.gateway=FixtureQuotes(self.cfg["dex"]["quote_token"],[1000,1000])
+        self.assertEqual(asyncio.run(d.swap("TOKEN","BUY",2_000_000,"test"))["settled_status"],"FILLED")
+
     def test_unquotable_inventory_remains_and_marks_zero(self):
         d=self.engine([1000,1000])
         asyncio.run(d.swap("TOKEN","BUY",2_000_000,"test"))

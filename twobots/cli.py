@@ -19,6 +19,7 @@ from .models import train_cex,train_scanner
 from .runtime import ProcessLock,maintain,maintenance_loop,scanner_loop
 from .cex import CexPaper
 from .dex import DexPaper,QuoteGateway
+from .follow import ActivityFeed,CopyTrader
 from .report import export_report
 from .demo import run_demo
 
@@ -43,7 +44,7 @@ def parser():
     s = commands.add_parser("scan")
     s.add_argument("--once",action="store_true")
     t = commands.add_parser("trade")
-    t.add_argument("--venue",choices=("cex","dex","both"),default="cex")
+    t.add_argument("--venue",choices=("cex","dex","copy","both"),default="cex")
     commands.add_parser("run",help="Scanner + enabled paper venues + hourly maintenance")
     commands.add_parser("report")
     demo = commands.add_parser("demo",help="Offline synthetic behavior demo, never performance evidence")
@@ -75,6 +76,10 @@ def doctor(cfg,store,http,online):
               "wallet_source":cfg["wallets"]["source"],
               "wallet_ledger_dir":cfg["wallets"]["ledger_dir"],
               "wallet_adapter_configured":bool(cfg["wallets"]["url_template"]),
+              "copy_trading_enabled":cfg["follow"]["enabled"],
+              "copy_activity_source":cfg["follow"]["source"],
+              "copy_activity_dir":cfg["follow"]["activity_dir"],
+              "copy_adapter_configured":bool(cfg["follow"]["url_template"]),
               "note":"Wallet discovery does not provide complete cost history. Supply normalized ledgers for ranking; no trading keys needed."}
     if online:
         checks = {}
@@ -98,11 +103,14 @@ async def services(args,cfg,store,http,fetcher):
         use_scan = args.command in ("run","scan")
         venues = []
         if args.command=="run":
-            venues = [v for v in ("cex","dex") if cfg[v]["enabled"]]
+            enabled = {"cex":cfg["cex"]["enabled"],"dex":cfg["dex"]["enabled"],"copy":cfg["follow"]["enabled"]}
+            venues = [v for v in ("cex","dex","copy") if enabled[v]]
         elif args.command=="trade":
             venues = ["cex","dex"] if args.venue=="both" else [args.venue]
             if "dex" in venues and not cfg["dex"]["enabled"]:
                 raise ValueError("Set dex.enabled: true after filling quote/security interfaces")
+            if "copy" in venues and not cfg["follow"]["enabled"]:
+                raise ValueError("Set follow.enabled: true and configure a leader activity feed")
         for name in (["scanner"] if use_scan else [])+venues:
             stack.enter_context(ProcessLock(store.root,name))
         wallet_scan_only = wallet_mode and args.command == "scan"
@@ -121,6 +129,9 @@ async def services(args,cfg,store,http,fetcher):
             tasks.append(asyncio.create_task(CexPaper(cfg,store,http,fetcher).run()))
         if "dex" in venues:
             tasks.append(asyncio.create_task(DexPaper(cfg,store,QuoteGateway(cfg,http)).run()))
+        if "copy" in venues:
+            tasks.append(asyncio.create_task(
+                CopyTrader(cfg,store,QuoteGateway(cfg,http),ActivityFeed(cfg,http)).run()))
         try:
             await asyncio.gather(*tasks)
         finally:

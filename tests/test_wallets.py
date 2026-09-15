@@ -40,7 +40,9 @@ class WalletAccounting(unittest.TestCase):
         self.assertAlmostEqual(m["profit_factor"], 12 / 7)
         ranked = rank_wallets([bad, good])
         self.assertEqual(ranked[0]["address"], good["address"])
-        self.assertLess(ranked[1]["score"], 0)
+        # A wallet that is net down is refused a rank outright, not merely scored low.
+        self.assertIsNone(ranked[1]["score"])
+        self.assertEqual(ranked[1]["status"], "observation")
 
     def test_capital_scale_does_not_improve_score(self):
         small = analyze(ledger(now=NOW))
@@ -89,15 +91,28 @@ class WalletAccounting(unittest.TestCase):
     def test_open_losers_reduce_score_and_open_winners_cannot_cancel(self):
         data = ledger(now=NOW)
         before = rank_wallets([analyze(data)])[0]["score"]
-        for i, value in ((800, "0"), (801, "10000")):
+        for i, value, cost in ((800, "0", "1000"), (801, "10000", "3000")):
             data["transactions"].append({"id": str(i), "ts": NOW-100, "side": "buy", "token": address(i),
-                                         "quantity": "1", "notional_usd": "3000", "fee_usd": "0"})
+                                         "quantity": "1", "notional_usd": cost, "fee_usd": "0"})
             data["marks"].append({"token": address(i), "quantity": "1", "value_usd": value, "asof": NOW})
         result = rank_wallets([analyze(data)])[0]
-        self.assertEqual(result["open_loss_usd"], -3000)
+        # Realised 1500 still covers the 1000 open loss, so this stays ranked but scores lower.
+        self.assertEqual(result["open_loss_usd"], -1000)
         self.assertGreater(result["unrealized_pnl_usd"], 0)
         self.assertLess(result["score"], before)
+        self.assertNotIn("realized_profit_does_not_cover_open_losses", result["flags"])
+
+    def test_open_losses_exceeding_realized_profit_block_the_ranking(self):
+        """Selling winners while holding losers must not out-rank an honest wallet."""
+        data = ledger(now=NOW)
+        data["transactions"].append({"id": "bag", "ts": NOW-100, "side": "buy", "token": address(800),
+                                     "quantity": "1", "notional_usd": "3000", "fee_usd": "0"})
+        data["marks"].append({"token": address(800), "quantity": "1", "value_usd": "0", "asof": NOW})
+        result = rank_wallets([analyze(data)])[0]
+        self.assertEqual(result["windows"]["90"]["realized_pnl_usd"] + result["open_loss_usd"], -1500)
         self.assertIn("realized_profit_does_not_cover_open_losses", result["flags"])
+        self.assertIsNone(result["score"])
+        self.assertIsNone(result["rank"])
 
     def test_failed_transaction_fees_reduce_realized_profit(self):
         data = ledger(now=NOW)

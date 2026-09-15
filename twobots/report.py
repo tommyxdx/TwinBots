@@ -7,7 +7,7 @@ from pathlib import Path
 
 def build_report(cfg,store):
     accounts = {}
-    for venue in ("cex","dex"):
+    for venue in ("cex","dex","copy"):
         state = store.get("account:"+venue)
         if state is None:
             continue
@@ -48,7 +48,9 @@ def build_report(cfg,store):
             "notifications":store.rows("SELECT status,count(*) AS n FROM outbox GROUP BY status"),
             "recent_local_rejections":store.rows("SELECT ts,payload FROM events WHERE kind='cex_rejection' ORDER BY id DESC LIMIT 20"),
             "recent_errors":store.rows("SELECT ts,kind,payload FROM events WHERE kind LIKE '%error%' OR kind LIKE '%unavailable%' ORDER BY id DESC LIMIT 20"),
-            "heartbeats":{k:store.get("heartbeat:"+k) for k in ("cex","dex","scanner","maintenance")},
+            "heartbeats":{k:store.get("heartbeat:"+k) for k in ("cex","dex","copy","scanner","maintenance")},
+            "copy_leaders":store.get("copy:leaders"),
+            "recent_copy_entries":store.rows("SELECT ts,payload FROM events WHERE kind='copy_entry_result' ORDER BY id DESC LIMIT 20"),
             "assumptions":{
                 "cex_latency_ms":cfg["cex"]["latency_ms"],"visible_depth_fraction":cfg["cex"]["visible_liquidity_fraction"],
                 "cex_fee_rate_fallback":cfg["cex"]["fee_rate"],"fee_currency":"USDT quote-equivalent",
@@ -63,6 +65,8 @@ def build_report(cfg,store):
                     "DEX quotes do not verify token transfer restrictions, MEV, slot landing or wallet execution",
                     "Missing failed-token history creates censoring/survivorship bias; no invented loss labels",
                     "Funding, borrowing and leverage excluded: spot inventory only",
+                    "Copy entries fill at our own later quote, never the leader's price; lag, size and capacity differ",
+                    "A leader's historical rank is not evidence that copying it is profitable",
                     "API/hosting/data subscription costs are not subtracted from account returns"]}}
 
 
@@ -93,6 +97,17 @@ def export_report(cfg,store):
                      + f"数据不足的钱包：{len(wallets['unavailable'])} 个。</p><div style='overflow-x:auto'><table><thead><tr>"
                      + "".join("<th>" + h + "</th>" for h in headings) + "</tr></thead><tbody>"
                      + "".join(rows) + "</tbody></table></div></section>")
+    leaders = report["copy_leaders"]
+    if cfg["follow"]["enabled"] and leaders is not None:
+        entries = [json.loads(row["payload"]) for row in report["recent_copy_entries"]]
+        filled = [e for e in entries if e.get("settled_status") == "FILLED"]
+        lags = [e["lag_s"] for e in filled if e.get("lag_s") is not None]
+        cards.append("<section><h2>跟单来源</h2><p>当前跟随 "
+                     + html.escape(str(len(leaders["addresses"]))) + " 个钱包："
+                     + (html.escape("、".join(leaders["addresses"])) or "无合格钱包")
+                     + f"。最近 {len(entries)} 次入场信号中成交 {len(filled)} 次"
+                     + (f"，跟单延迟中位数 {sorted(lags)[len(lags)//2]:.1f} 秒" if lags else "")
+                     + "。成交价是本程序自己的报价，不是被跟随钱包的成交价。</p></section>")
     for venue,item in report["accounts"].items():
         state = item["account"]
         marks = item["latest_mark"]
