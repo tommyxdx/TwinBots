@@ -39,13 +39,17 @@ class ProcessLock:
 def maintain(cfg,store,fetcher,bootstrap=False):
     # Separate lock permits scanner/trader commands to share a DB with fetch.
     with ProcessLock(store.root,"maintenance"):
-        if bootstrap:
+        wallet_mode = cfg["scanner"].get("kind", "wallets") == "wallets"
+        if bootstrap and (cfg["cex"]["enabled"] or not wallet_mode):
             fetcher.bootstrap()
-        fetcher.follow_cohort()
+        if not wallet_mode:
+            fetcher.follow_cohort()
         last = store.get("models:last_attempt",0)
         if time.time()-last>86400:
-            train_cex(cfg,store)
-            train_scanner(cfg,store)
+            if cfg["cex"]["enabled"] or not wallet_mode:
+                train_cex(cfg,store)
+            if not wallet_mode:
+                train_scanner(cfg,store)
             store.set("models:last_attempt",time.time())
         # Retain candle history for training. Raw depth/chain logs are never stored.
         cutoff = time.time()-35*86400

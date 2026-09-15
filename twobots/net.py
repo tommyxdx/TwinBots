@@ -50,7 +50,7 @@ class HTTP:
                 delay = self.cfg.get("host_intervals", {}).get(parsed.hostname, self.cfg["min_interval_s"])
                 time.sleep(max(0, self.last.get(parsed.hostname, 0) + delay - time.monotonic()))
                 self.last[parsed.hostname] = time.monotonic()
-            req = urllib.request.Request(url, data=body, headers={"User-Agent": "TwinCryptoBots/1.1.1", **(headers or {})})
+            req = urllib.request.Request(url, data=body, headers={"User-Agent": "TwinCryptoBots/1.2.0", **(headers or {})})
             start = time.monotonic()
             try:
                 with safe_urlopen(req, timeout=self.cfg["timeout_s"]) as r:

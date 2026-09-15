@@ -132,12 +132,13 @@ class Fetcher:
                 self.recent_cex(symbol, 1000)
             except Exception as exc:
                 report["errors"].append({"symbol": symbol, "stage": "recent", "error": str(exc)})
-        if h.get("pool_catalog_url"):
+        token_mode = self.cfg["scanner"].get("kind", "wallets") == "tokens"
+        if token_mode and h.get("pool_catalog_url"):
             try:
                 self.import_catalog(h["pool_catalog_url"])
             except Exception as exc:
                 report["errors"].append({"stage": "catalog", "error": str(exc)})
-        if h.get("scanner_dataset_url"):
+        if token_mode and h.get("scanner_dataset_url"):
             try:
                 self.download_scanner_dataset()
             except Exception as exc:

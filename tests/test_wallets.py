@@ -1,0 +1,292 @@
+"""Offline financial-accounting counterexamples, never trading performance evidence."""
+import argparse
+import asyncio
+from copy import deepcopy
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+
+from examples.wallet_demo import address, ledger, NoNetwork
+from twobots.cli import services
+from twobots.config import load_config
+from twobots.report import build_report, export_report
+from twobots.runtime import maintain
+from twobots.storage import Store
+from twobots.wallet_scanner import WalletScanner
+from twobots.wallets import analyze_ledger, rank_wallets, valid_address, DAY
+
+ROOT = Path(__file__).resolve().parents[1]
+NOW = 1900000000
+
+
+def analyze(data):
+    return analyze_ledger(data, data["address"], now=NOW)
+
+
+class WalletAccounting(unittest.TestCase):
+    def test_solana_address_decodes_to_32_bytes(self):
+        self.assertTrue(valid_address(address(500)))
+        for value in ("0" * 44, "1" * 44, "../../secret", None, "hello"):
+            self.assertFalse(valid_address(value))
+
+    def test_low_win_profitable_beats_high_win_loser(self):
+        good = analyze(ledger(now=NOW))
+        bad = analyze(ledger(501, "high_win_loss", now=NOW))
+        m = good["windows"]["90"]
+        self.assertEqual(m["realized_pnl_usd"], 1500)
+        self.assertEqual(m["win_rate"], .3)
+        self.assertAlmostEqual(m["profit_factor"], 12 / 7)
+        ranked = rank_wallets([bad, good])
+        self.assertEqual(ranked[0]["address"], good["address"])
+        self.assertLess(ranked[1]["score"], 0)
+
+    def test_capital_scale_does_not_improve_score(self):
+        small = analyze(ledger(now=NOW))
+        large = analyze(ledger(501, scale=100, now=NOW))
+        ranks = rank_wallets([small, large])
+        self.assertEqual(ranks[0]["score"], ranks[1]["score"])
+        self.assertEqual(large["windows"]["90"]["realized_pnl_usd"], 100 * small["windows"]["90"]["realized_pnl_usd"])
+
+    def test_one_token_jackpot_does_not_outrank_distributed_edge(self):
+        good = analyze(ledger(now=NOW))
+        lucky = analyze(ledger(501, "jackpot", now=NOW))
+        self.assertGreater(lucky["windows"]["90"]["realized_pnl_usd"], good["windows"]["90"]["realized_pnl_usd"])
+        ranked = rank_wallets([lucky, good])
+        self.assertEqual(ranked[0]["address"], good["address"])
+        self.assertIn("not_profitable_without_best_token", ranked[1]["flags"])
+
+    def test_wac_allocates_buy_and_sell_fees_without_future_buy_rewrite(self):
+        data = ledger(now=NOW)
+        base = data["transactions"][0]
+        data["transactions"] = [dict(base, id="1", quantity="10", notional_usd="100", fee_usd="2"),
+                                dict(base, id="2", ts=NOW-1000, side="sell", quantity="4", notional_usd="60", fee_usd="1"),
+                                dict(base, id="3", ts=NOW-500, quantity="4", notional_usd="80", fee_usd="0")]
+        data["marks"] = [{"token": base["token"], "asof": NOW, "quantity": "10", "value_usd": "141.2"}]
+        report = analyze(data)
+        self.assertAlmostEqual(report["windows"]["90"]["realized_pnl_usd"], 18.2)
+        self.assertAlmostEqual(report["open_cost_usd"], 141.2)
+        self.assertEqual(report["windows"]["90"]["closed_cycles"], 0)
+
+    def test_partial_sell_splitting_does_not_inflate_wins_or_score(self):
+        data = ledger(now=NOW)
+        original = analyze(data)
+        txs = []
+        for row in data["transactions"]:
+            if row["side"] == "buy":
+                txs.append(row)
+            else:
+                for i in range(10):
+                    txs.append(dict(row, id=row["id"] + f":{i}", quantity="0.1",
+                                    notional_usd=str(float(row["notional_usd"]) / 10)))
+        data["transactions"] = txs
+        split = analyze(data)
+        self.assertEqual(split["windows"]["90"]["closed_cycles"], 30)
+        self.assertEqual(split["windows"]["90"]["sell_fills"], 300)
+        self.assertEqual(rank_wallets([original])[0]["score"], rank_wallets([split])[0]["score"])
+
+    def test_open_losers_reduce_score_and_open_winners_cannot_cancel(self):
+        data = ledger(now=NOW)
+        before = rank_wallets([analyze(data)])[0]["score"]
+        for i, value in ((800, "0"), (801, "10000")):
+            data["transactions"].append({"id": str(i), "ts": NOW-100, "side": "buy", "token": address(i),
+                                         "quantity": "1", "notional_usd": "3000", "fee_usd": "0"})
+            data["marks"].append({"token": address(i), "quantity": "1", "value_usd": value, "asof": NOW})
+        result = rank_wallets([analyze(data)])[0]
+        self.assertEqual(result["open_loss_usd"], -3000)
+        self.assertGreater(result["unrealized_pnl_usd"], 0)
+        self.assertLess(result["score"], before)
+        self.assertIn("realized_profit_does_not_cover_open_losses", result["flags"])
+
+    def test_failed_transaction_fees_reduce_realized_profit(self):
+        data = ledger(now=NOW)
+        data["transactions"].append({"id": "failed", "ts": NOW-1, "side": "fee", "fee_usd": "100"})
+        self.assertEqual(analyze(data)["windows"]["90"]["realized_pnl_usd"], 1400)
+
+    def test_cross_window_cycle_uses_old_cost_but_not_partial_window_win_rate(self):
+        data = ledger(now=NOW)
+        buy, sell = data["transactions"][:2]
+        data["transactions"] = [dict(buy, ts=NOW-95*DAY), dict(sell, ts=NOW-1)]
+        result = analyze(data)["windows"]["90"]
+        self.assertEqual(result["realized_pnl_usd"], 400)
+        self.assertEqual(result["closed_cycles"], 0)
+        self.assertEqual(result["cross_window_cycles_excluded"], 1)
+        self.assertIsNone(result["win_rate"])
+
+    def test_unknown_or_false_coverage_never_ranks(self):
+        for field in ledger(now=NOW)["quality"]:
+            for value in (False, "true", None):
+                with self.subTest(field=field, value=value):
+                    data = ledger(now=NOW)
+                    data["quality"][field] = value
+                    with self.assertRaises(ValueError):
+                        analyze(data)
+
+    def test_bad_cost_or_transfers_cannot_be_zero_cost_profit(self):
+        for side in ("transfer_in", "airdrop", "sell"):
+            data = ledger(now=NOW)
+            data["transactions"][0]["side"] = side
+            with self.assertRaises(ValueError):
+                analyze(data)
+
+    def test_invalid_identity_duplicate_and_nonfinite_amount_rejected(self):
+        original = ledger(now=NOW)
+        modifications = [lambda d: d.update(network="ethereum"), lambda d: d.update(asof=NOW+100),
+                         lambda d: d.update(asof=NOW-30000), lambda d: d.update(history_start=NOW-10*DAY),
+                         lambda d: d["transactions"][1].update(id=d["transactions"][0]["id"]),
+                         lambda d: d["transactions"][1].update(notional_usd="NaN"),
+                         lambda d: d["transactions"][1].update(fee_usd=True),
+                         lambda d: d["transactions"][1].update(ts=NOW+1)]
+        for mutate in modifications:
+            data = deepcopy(original)
+            mutate(data)
+            with self.assertRaises(ValueError):
+                analyze(data)
+
+    def test_missing_or_inconsistent_inventory_mark_rejected(self):
+        data = ledger(now=NOW)
+        data["transactions"] = data["transactions"][:1]
+        with self.assertRaises(ValueError):
+            analyze(data)
+        data["marks"] = [{"token": data["transactions"][0]["token"], "quantity": "2", "asof": NOW, "value_usd": "500"}]
+        with self.assertRaises(ValueError):
+            analyze(data)
+
+    def test_currency_and_future_execution_are_not_silently_accepted(self):
+        data = ledger(now=NOW)
+        data["currency"] = "EUR"
+        with self.assertRaises(ValueError):
+            analyze(data)
+        data = ledger(now=NOW)
+        data["asof"] = NOW + 30
+        data["transactions"][-1]["ts"] = NOW + 10
+        with self.assertRaises(ValueError):
+            analyze(data)
+
+    def test_small_sample_stays_observation_even_with_extreme_profit(self):
+        data = ledger(style="jackpot", now=NOW)
+        data["transactions"] = data["transactions"][:2]
+        result = rank_wallets([analyze(data)])[0]
+        self.assertIsNone(result["rank"])
+        self.assertIsNone(result["score"])
+
+    def test_no_losses_produces_json_safe_metrics_without_infinite_confidence(self):
+        data = ledger(now=NOW)
+        for row in data["transactions"]:
+            if row["side"] == "sell":
+                row["notional_usd"] = "600"
+        result = rank_wallets([analyze(data)])[0]
+        self.assertIsNone(result["windows"]["90"]["profit_factor"])
+        self.assertLess(result["sample_weight"], 1)
+        json.dumps(result, allow_nan=False)
+
+
+class WalletWorkflow(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = load_config(ROOT / "config.example.yaml")
+        self.cfg["data_dir"] = self.tmp.name
+        self.cfg["wallets"].update(ledger_dir=str(Path(self.tmp.name) / "ledgers"),
+                                   discover_enabled=False, addresses=[address(500)])
+        self.store = Store(self.tmp.name)
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def put(self, data):
+        folder = Path(self.cfg["wallets"]["ledger_dir"])
+        folder.mkdir(exist_ok=True)
+        (folder / (data["address"] + ".json")).write_bytes(json.dumps(data).encode())
+
+    def test_offline_scan_and_report_need_no_network_or_bootstrap(self):
+        self.put(ledger(now=NOW))
+        args = argparse.Namespace(command="scan", once=True)
+        with patch("time.time", return_value=NOW), patch("twobots.cli.maintain") as maintenance, patch("twobots.cli.output"):
+            asyncio.run(services(args, self.cfg, self.store, NoNetwork(), NoNetwork()))
+            maintenance.assert_not_called()
+            report = build_report(self.cfg, self.store)
+            self.assertEqual(report["wallet_scanner"]["ranking"][0]["rank"], 1)
+            self.assertFalse(report["wallet_scanner"]["stale"])
+            self.assertIn("完整平仓", Path(export_report(self.cfg, self.store)).read_text(encoding="utf-8"))
+
+    def test_http_adapter_cache_and_refresh_budget(self):
+        self.cfg["wallets"].update(source="adapter", url_template="https://adapter.example/{network}/{address}")
+        http = Mock()
+        http.request.return_value = json.dumps(ledger(now=NOW)).encode()
+        scanner = WalletScanner(self.cfg, self.store, http, NoNetwork())
+        with patch("time.time", return_value=NOW):
+            scanner.run_once()
+            scanner.run_once()
+        self.assertEqual(http.request.call_count, 1)
+
+    def test_stale_cached_result_never_remains_ranked(self):
+        self.cfg["wallets"].update(source="adapter", url_template="https://adapter.example/{address}", refresh_s=50000)
+        http = Mock()
+        http.request.return_value = json.dumps(ledger(now=NOW)).encode()
+        scanner = WalletScanner(self.cfg, self.store, http, NoNetwork())
+        with patch("time.time", return_value=NOW):
+            scanner.run_once()
+        with patch("time.time", return_value=NOW+22000):
+            result = scanner.run_once()
+        self.assertFalse(result["ranking"])
+        self.assertEqual(len(result["unavailable"]), 1)
+        self.assertEqual(http.request.call_count, 1)
+
+    def test_invalid_local_refresh_removes_previous_good_result(self):
+        data = ledger(now=NOW)
+        self.put(data)
+        scanner = WalletScanner(self.cfg, self.store, NoNetwork(), NoNetwork())
+        with patch("time.time", return_value=NOW):
+            self.assertTrue(scanner.run_once()["ranking"])
+            data["quality"]["complete"] = False
+            self.put(data)
+            self.assertFalse(scanner.run_once()["ranking"])
+
+    def test_wallet_refresh_rotates_and_is_bounded(self):
+        self.cfg["wallets"].update(source="adapter", url_template="https://adapter.example/{address}",
+                                   addresses=[address(500), address(501)], max_wallets_per_run=1)
+        http = Mock()
+        http.request.side_effect = [json.dumps(ledger(now=NOW)).encode(), json.dumps(ledger(501, now=NOW+1)).encode()]
+        scanner = WalletScanner(self.cfg, self.store, http, NoNetwork())
+        with patch("time.time", return_value=NOW):
+            self.assertEqual(len(scanner.run_once()["ranking"]), 1)
+        with patch("time.time", return_value=NOW+1):
+            self.assertEqual(len(scanner.run_once()["ranking"]), 2)
+        self.assertEqual(http.request.call_count, 2)
+
+    def test_candidate_discovery_cached_and_not_treated_as_profit_history(self):
+        self.cfg["wallets"].update(discover_enabled=True, addresses=[])
+        fetcher, http = Mock(), Mock()
+        fetcher.discover.return_value = [{"pool": address(100)}]
+        http.json.return_value = {"data": [{"attributes": {"tx_from_address": address(500)}},
+                                           {"attributes": {"tx_from_address": "bad"}}]}
+        scanner = WalletScanner(self.cfg, self.store, http, fetcher)
+        with patch("time.time", return_value=NOW):
+            result = scanner.run_once()
+            scanner.run_once()
+        self.assertEqual(fetcher.discover.call_count, 1)
+        self.assertEqual(http.json.call_count, 1)
+        self.assertEqual(result["candidate_count"], 1)
+        self.assertFalse(result["ranking"])
+
+    def test_wallet_maintenance_skips_token_models_and_history(self):
+        fetcher = Mock()
+        with patch("twobots.runtime.train_cex") as cex, patch("twobots.runtime.train_scanner") as tokens:
+            maintain(self.cfg, self.store, fetcher, True)
+            cex.assert_called_once()
+            tokens.assert_not_called()
+            fetcher.follow_cohort.assert_not_called()
+
+    def test_wallet_mode_rejects_dex_copy_execution_configuration(self):
+        raw = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+        raw = raw.replace("dex:\n  enabled: false", "dex:\n  enabled: true")
+        path = Path(self.tmp.name) / "bad.yaml"
+        path.write_text(raw, encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "copy trading"):
+            load_config(path)
+
+
+if __name__ == "__main__":
+    unittest.main()

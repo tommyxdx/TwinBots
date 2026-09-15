@@ -9,3 +9,5 @@ __pycache__/
 .test-tmp/
 adapter.local.json
 audit_demo/
+wallet_ledgers/
+wallet_demo_output/

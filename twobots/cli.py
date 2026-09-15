@@ -14,6 +14,7 @@ from .net import HTTP
 from .data import Fetcher
 from .notify import Telegram
 from .scanner import Scanner
+from .wallet_scanner import WalletScanner
 from .models import train_cex,train_scanner
 from .runtime import ProcessLock,maintain,maintenance_loop,scanner_loop
 from .cex import CexPaper
@@ -70,7 +71,11 @@ def doctor(cfg,store,http,online):
               "dex_enabled":cfg["dex"]["enabled"],"dex_provider":cfg["dex"]["provider"],
               "security_adapter_configured":bool(cfg["scanner"]["feature_url_template"]),
               "remote_scanner_dataset_configured":bool(cfg["history"]["scanner_dataset_url"]),
-              "note":"Absent optional credentials do not block CEX public-data paper trading; no 100x pretrained model is bundled."}
+              "scanner_kind":cfg["scanner"]["kind"],
+              "wallet_source":cfg["wallets"]["source"],
+              "wallet_ledger_dir":cfg["wallets"]["ledger_dir"],
+              "wallet_adapter_configured":bool(cfg["wallets"]["url_template"]),
+              "note":"Wallet discovery does not provide complete cost history. Supply normalized ledgers for ranking; no trading keys needed."}
     if online:
         checks = {}
         for name,url in (("binance",cfg["cex"]["rest_base"]+"/api/v3/time"),
@@ -87,7 +92,8 @@ def doctor(cfg,store,http,online):
 
 
 async def services(args,cfg,store,http,fetcher):
-    scanner = Scanner(cfg,store,http,fetcher,Telegram(cfg,store,http))
+    wallet_mode = cfg["scanner"]["kind"] == "wallets"
+    scanner = (WalletScanner if wallet_mode else Scanner)(cfg,store,http,fetcher,Telegram(cfg,store,http))
     with ExitStack() as stack:
         use_scan = args.command in ("run","scan")
         venues = []
@@ -99,7 +105,8 @@ async def services(args,cfg,store,http,fetcher):
                 raise ValueError("Set dex.enabled: true after filling quote/security interfaces")
         for name in (["scanner"] if use_scan else [])+venues:
             stack.enter_context(ProcessLock(store.root,name))
-        if cfg["bootstrap_on_start"]:
+        wallet_scan_only = wallet_mode and args.command == "scan"
+        if cfg["bootstrap_on_start"] and not wallet_scan_only:
             try:
                 await asyncio.to_thread(maintain,cfg,store,fetcher,True)
             except Exception as exc:
@@ -107,7 +114,7 @@ async def services(args,cfg,store,http,fetcher):
         if args.command=="scan" and args.once:
             output(await asyncio.to_thread(scanner.run_once))
             return
-        tasks = [asyncio.create_task(maintenance_loop(cfg,store,fetcher))]
+        tasks = [] if wallet_scan_only else [asyncio.create_task(maintenance_loop(cfg,store,fetcher))]
         if use_scan:
             tasks.append(asyncio.create_task(scanner_loop(scanner,cfg)))
         if "cex" in venues:
@@ -147,20 +154,25 @@ def main(argv=None):
         elif args.command=="report":
             output({"report":export_report(cfg,store)})
         elif args.command=="train":
+            if cfg["scanner"]["kind"] == "wallets" and args.target == "scanner":
+                output({"scanner":"Wallet ranking is deterministic and needs no model training"})
+                return 0
+            targets = ("cex",) if cfg["scanner"]["kind"] == "wallets" else ("cex","scanner")
             with ProcessLock(store.root,"maintenance"):
                 output({k:(train_cex if k=="cex" else train_scanner)(cfg,store)
-                        for k in (("cex","scanner") if args.target=="all" else (args.target,))})
+                        for k in (targets if args.target=="all" else (args.target,))})
         elif args.command=="fetch":
             if not 1<=args.pool_pages<=20:
                 raise ValueError("--pool-pages must be between 1 and 20")
             while True:
                 with ProcessLock(store.root,"maintenance"):
                     result = {"bootstrap":fetcher.bootstrap()}
-                    try:
-                        result["discovered"] = len(fetcher.discover())
-                        result["cohort"] = fetcher.follow_cohort(args.pool_pages)
-                    except Exception as exc:
-                        result["scanner_error"] = str(exc)
+                    if cfg["scanner"]["kind"] == "tokens":
+                        try:
+                            result["discovered"] = len(fetcher.discover())
+                            result["cohort"] = fetcher.follow_cohort(args.pool_pages)
+                        except Exception as exc:
+                            result["scanner_error"] = str(exc)
                     output(result)
                 if not args.watch:
                     break

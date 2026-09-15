@@ -33,8 +33,14 @@ def build_report(cfg,store):
                            "forward_metrics": performance,
                            "capital_scope":"Separate hypothetical account; do not add CEX and DEX returns as one $100 portfolio"}
     scans = store.rows("SELECT payload FROM scans ORDER BY id DESC LIMIT 20")
+    wallet_report = store.get("wallet:latest")
+    if wallet_report is not None:
+        wallet_report["report_age_s"] = time.time() - wallet_report["generated_at"]
+        wallet_report["stale"] = wallet_report["report_age_s"] > cfg["wallets"]["max_age_s"] or any(
+            time.time() - row["asof"] > cfg["wallets"]["max_age_s"] for row in wallet_report["ranking"])
     return {"generated_at":time.time(),"mode":"PAPER_ONLY","accounts":accounts,
-            "scanner_latest":[json.loads(x["payload"]) for x in scans],
+            "scanner_kind":cfg["scanner"]["kind"], "wallet_scanner":wallet_report,
+            "scanner_latest":[json.loads(x["payload"]) for x in scans] if cfg["scanner"]["kind"] == "tokens" else [],
             "model_cex":store.get("model:cex"),"model_scanner":store.get("model:scanner"),
             "history_bootstrap":store.get("bootstrap:report"),"cohort":store.get("history:cohort_report"),
             "request_counts":store.rows("SELECT * FROM requests ORDER BY day DESC LIMIT 7"),
@@ -67,6 +73,26 @@ def export_report(cfg,store):
     raw = json.dumps(report,ensure_ascii=False,indent=2,allow_nan=False)
     (folder/"latest.json").write_text(raw,encoding="utf-8")
     cards = []
+    wallets = report["wallet_scanner"] if cfg["scanner"]["kind"] == "wallets" else None
+    if wallets is not None:
+        def fmt(value, percent=False):
+            return "—" if value is None else (f"{value:.1%}" if percent else f"{value:,.2f}")
+        rows = []
+        for wallet in wallets["ranking"]:
+            m = wallet["windows"]["90"]
+            values = [wallet["rank"] or "观察", wallet["address"], fmt(m["realized_pnl_usd"]),
+                      fmt(m["cost_roi"], True), m["closed_cycles"], m["trade_fills"], fmt(m["win_rate"], True),
+                      fmt(m["profit_factor"]), fmt(m["without_best_token_pnl_usd"]), fmt(wallet["open_loss_usd"]),
+                      fmt(wallet["score"])]
+            rows.append("<tr>" + "".join("<td>" + html.escape(str(v)) + "</td>" for v in values) + "</tr>")
+        headings = ["排名", "钱包地址", "已实现净盈亏 $", "已售成本收益率", "完整平仓", "成交次数", "胜率",
+                    "Profit Factor", "去掉最大盈利币后 $", "未平仓亏损 $", "研究分数"]
+        cards.append("<section><h2>钱包历史表现 · 90 天</h2><p>"
+                     + ("数据已过期，请重新扫描。" if wallets["stale"] else "各钱包数据截止时间见审计明细。")
+                     + "胜率按完整持仓周期计算，跨窗口周期不计入胜率；分数不是盈利概率。"
+                     + f"数据不足的钱包：{len(wallets['unavailable'])} 个。</p><div style='overflow-x:auto'><table><thead><tr>"
+                     + "".join("<th>" + h + "</th>" for h in headings) + "</tr></thead><tbody>"
+                     + "".join(rows) + "</tbody></table></div></section>")
     for venue,item in report["accounts"].items():
         state = item["account"]
         marks = item["latest_mark"]
@@ -76,7 +102,7 @@ def export_report(cfg,store):
                      f"<p>新仓暂停：{state['halted']}；持仓数：{len(state['positions'])}</p></section>")
     text = ("<!doctype html><html lang='zh-CN'><meta charset='utf-8'><meta name='viewport' content='width=device-width'>"
             "<title>TwinCryptoBots 模拟报告</title><style>body{font:16px/1.6 system-ui;max-width:1050px;margin:40px auto;padding:0 20px;background:#101820;color:#edf2f7}"
-            "section{background:#1b2b36;padding:16px;margin:16px 0;border-radius:10px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}summary{cursor:pointer}</style>"
+            "section{background:#1b2b36;padding:16px;margin:16px 0;border-radius:10px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}summary{cursor:pointer}table{border-collapse:collapse;font-size:13px}th,td{padding:8px;border-bottom:1px solid #405360;text-align:right}td:nth-child(2){font-family:monospace;text-align:left}</style>"
             "<h1>TwinCryptoBots · PAPER</h1><p>这是模拟记录，未执行真实交易。两个账户各自使用虚拟本金，不能合并视为一笔 $100 的收益。</p>"
             +"".join(cards)+"<p>完整成交、模型检验、数据覆盖和假设见下方 JSON。此报告不会自动刷新，请重新运行 report。</p>"
             "<details open><summary>审计数据</summary><pre>"+html.escape(raw)+"</pre></details></html>")

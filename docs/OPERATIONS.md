@@ -9,7 +9,7 @@
 
 ## 配置运行顺序
 
-先运行离线 demo、测试，再 `doctor --online`。让默认 CEX paper 和 scanner 运行；若只想看候选，运行 `scan`。补齐 DEX 报价及安全数据后再把 `dex.enabled` 改为 true，仍然只有模拟。
+先运行离线 demo、测试，再 `doctor --online`。让默认 CEX paper 和 scanner 运行；若只想看候选，运行 `scan`。默认钱包模式保持 `dex.enabled: false`，不会自动跟单。钱包数据接入见 `docs/WALLET_DATA.md`；只有明确切换旧 `scanner.kind: tokens`、补齐报价与安全数据后才可启用旧 DEX paper。
 
 如使用本地 GET 字段适配器，复制 `adapter.example.json` 为自己的配置，填写两个 upstream URL、输入参数对应名、输出 JSON 字段路径，以及 key 环境变量。先独立启动 `python scripts/adapter_server.py --config YOUR_ADAPTER.json`，然后 bot 使用 `http://127.0.0.1:8787/features?network={network}&token={token}&pool={pool}` 和 `/quote`。桥接器不加载 `.env`；其 key 应由操作系统环境变量提供。缺失字段不补真值，复杂 API 不属于仅字段改名可解决的范围。
 

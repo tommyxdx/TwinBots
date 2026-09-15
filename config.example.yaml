@@ -8,7 +8,7 @@ http:
   max_requests_per_day: 1000
   min_interval_s: 0.15
   host_intervals:
-    api.geckoterminal.com: 3
+    api.geckoterminal.com: 6.5
     api.jup.ag: 2
 history:
   archive_base: https://data.binance.vision
@@ -32,6 +32,7 @@ history:
   cohort_follow_days: 35
   cohort_refresh_hours: 12
 scanner:
+  kind: wallets  # wallets is the default; tokens retains the legacy scanner.
   network: solana
   gecko_base: https://api.geckoterminal.com/api/v2
   poll_s: 600
@@ -57,6 +58,27 @@ scanner:
     - {name: x2_24h, multiple: 2, horizon_hours: 24}
     - {name: x10_7d, multiple: 10, horizon_hours: 168}
     - {name: x100_30d, multiple: 100, horizon_hours: 720}
+wallets:
+  # local: <ledger_dir>/<Solana address>.json, schema in docs/WALLET_DATA.md.
+  # adapter: trusted GET endpoint returning that same complete ledger schema.
+  source: local
+  ledger_dir: wallet_ledgers
+  addresses: []
+  url_template: ""  # Optional {network} and {address}; NOT a raw PnL API URL.
+  api_key_env: WALLET_DATA_API_KEY
+  header: Authorization
+  header_prefix: "Bearer "
+  discover_enabled: true
+  discovery_every_s: 21600
+  discovery_max_pools: 2
+  discovery_addresses_per_pool: 10
+  max_candidates: 50
+  max_wallets_per_run: 2
+  refresh_s: 21600
+  max_age_s: 21600
+  max_ledger_mb: 10
+  min_closed_cycles: 10
+  min_closed_tokens: 3
 telegram:
   enabled: false
   token_env: TELEGRAM_BOT_TOKEN

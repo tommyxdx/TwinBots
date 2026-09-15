@@ -33,6 +33,35 @@ def load_config(path="config.yaml"):
     finite_config(cfg)
     if cfg.get("mode") != "paper":
         raise ValueError("Only mode: paper is supported. Real trading is not implemented.")
+    cfg["scanner"].setdefault("kind", "wallets")
+    if cfg["scanner"]["kind"] not in ("wallets", "tokens"):
+        raise ValueError("scanner.kind must be wallets or tokens")
+    defaults = {"source": "local", "ledger_dir": "wallet_ledgers", "addresses": [],
+                "url_template": "", "api_key_env": "WALLET_DATA_API_KEY",
+                "header": "Authorization", "header_prefix": "Bearer ",
+                "discover_enabled": True, "discovery_every_s": 21600,
+                "discovery_max_pools": 2, "discovery_addresses_per_pool": 10,
+                "max_candidates": 50, "max_wallets_per_run": 2, "refresh_s": 21600,
+                "max_age_s": 21600, "max_ledger_mb": 10,
+                "min_closed_cycles": 10, "min_closed_tokens": 3}
+    w = cfg["wallets"] = {**defaults, **cfg.get("wallets", {})}
+    if w["source"] not in ("local", "adapter") or type(w["discover_enabled"]) is not bool:
+        raise ValueError("Invalid wallet source/discovery configuration")
+    from .wallets import valid_address
+    if not isinstance(w["addresses"], list) or any(not valid_address(a) for a in w["addresses"]):
+        raise ValueError("wallets.addresses must be a list of Solana public addresses")
+    for key in ("discovery_every_s", "discovery_max_pools", "discovery_addresses_per_pool", "max_candidates",
+                "max_wallets_per_run", "refresh_s", "max_age_s", "max_ledger_mb", "min_closed_cycles", "min_closed_tokens"):
+        if type(w[key]) is not int or w[key] <= 0:
+            raise ValueError(f"wallets.{key} must be a positive integer")
+    if w["max_candidates"] > 1000 or len(w["addresses"]) > w["max_candidates"] or w["max_ledger_mb"] > 64:
+        raise ValueError("Wallet candidate/ledger limits exceeded")
+    w["ledger_dir"] = str((path.parent / w["ledger_dir"]).resolve())
+    if cfg["scanner"]["kind"] == "wallets":
+        if cfg["scanner"]["network"] != "solana":
+            raise ValueError("Wallet ledger accounting currently supports Solana only")
+        if cfg["dex"]["enabled"]:
+            raise ValueError("Wallet ranking is research only: keep dex.enabled false; copy trading is not implemented")
     root = Path(cfg["data_dir"])
     cfg["data_dir"] = str((path.parent / root).resolve())
     Path(cfg["data_dir"]).mkdir(parents=True, exist_ok=True)
