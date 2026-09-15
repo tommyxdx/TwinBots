@@ -20,6 +20,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sys
 
+from twobots.config import load_env
+
 from .helius import Helius
 from .prices import SolPrice, quote_pricer
 from .reconstruct import classify, normalize, quote_usd
@@ -160,7 +162,11 @@ def main(argv=None):
     w.add_argument("--port", type=int, default=8788)
     w.add_argument("--listen", default="127.0.0.1")
     w.add_argument("--secret-env", default="WALLET_WEBHOOK_SECRET")
+    for sub_parser in (p, w):
+        sub_parser.add_argument("--env", default=".env",
+                                help="File to read HELIUS_API_KEY from")
     args = parser.parse_args(argv)
+    load_env(Path(args.env))
 
     if args.mode == "webhook":
         import os

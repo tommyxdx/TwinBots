@@ -285,6 +285,74 @@ def test_activity_feed_write_is_atomic(tmp_path):
     assert not list(tmp_path.glob("*.part"))
 
 
+class FakeHelius:
+    def __init__(self, entries):
+        self.entries, self.calls = entries, 1
+
+    def transactions(self, address, **kwargs):
+        return iter(self.entries)
+
+
+class FakeSolPrice:
+    def load(self, *args):
+        return 0
+
+    def at(self, ts):
+        return SOL_USD
+
+
+def clean_history(now, count=15):
+    entries = []
+    for i in range(count):
+        ts = int(now - 85 * DAY + i * 2 * DAY)
+        token = [BONK, WIF, POPCAT][i % 3]
+        entries.append(usdc_swap(f"b{i}", ts, token, 1000, -500, slot=100 + i))
+        entries.append(usdc_swap(f"s{i}", ts + 3600, token, -1000, 900, slot=200 + i))
+    entries.append(entry("genesis", int(now - 120 * DAY),
+                         pre=[balance(1, USDC, WALLET, 0)],
+                         post=[balance(1, USDC, WALLET, 50_000_000_000)]))
+    return entries
+
+
+def test_build_reports_an_unusable_wallet_instead_of_raising():
+    """One unsolicited airdrop is enough, and the report has to say so."""
+    import time
+    from adapters.ledger import build
+    now = time.time()
+    entries = clean_history(now)
+    entries.append(entry("spam", int(now - 30 * DAY), fee=0,
+                         pre=[balance(5, POPCAT, WALLET, 0, 9)],
+                         post=[balance(5, POPCAT, WALLET, 10 ** 15, 9)]))
+    ledger, report = build(WALLET, FakeHelius(entries), FakeSolPrice(), now=now, quote_marks=False)
+    assert ledger is None
+    assert report["usable"] is False
+    assert report["blocked_by"] == "unreconstructable_cost_basis"
+    assert report["reasons"] == {"transfer_or_airdrop": 1}
+    assert report["trade_rows"] == 30
+
+
+def test_build_produces_a_ledger_the_ranking_accepts():
+    import time
+    from adapters.ledger import build
+    now = time.time()
+    ledger, report = build(WALLET, FakeHelius(clean_history(now)), FakeSolPrice(),
+                           now=now, quote_marks=False)
+    assert report["usable"] is True and report["unreconstructable"] == 0
+    result = analyze_ledger(ledger, WALLET, "solana", now)
+    assert result["windows"]["90"]["closed_cycles"] == 15
+
+
+def test_build_reports_short_history_without_spending_on_marks():
+    import time
+    from adapters.ledger import build
+    now = time.time()
+    entries = [usdc_swap("b0", int(now - 10 * DAY), BONK, 1000, -500)]
+    ledger, report = build(WALLET, FakeHelius(entries), FakeSolPrice(), now=now, quote_marks=False)
+    assert ledger is None
+    assert report["blocked_by"] == "history_shorter_than_90_days"
+    assert report["history_days"] == 10
+
+
 @pytest.mark.parametrize("field", ["signatures", "blockTime"])
 def test_malformed_entries_raise_rather_than_silently_drop(field):
     e = usdc_swap("s14", 1_700_000_000, BONK, 1000, -250)
