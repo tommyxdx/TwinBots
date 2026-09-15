@@ -38,7 +38,8 @@ def load_config(path="config.yaml"):
         raise ValueError("scanner.kind must be wallets or tokens")
     defaults = {"source": "chain", "ledger_dir": "wallet_ledgers", "addresses": [],
                 "ledger_build_every_s": 600, "ledger_build_refresh_s": 86400,
-                "ledgers_per_cycle": 3, "ledger_max_pages": 400, "ledger_retry_s": 3600,
+                "ledgers_per_cycle": 25, "ledger_calls_per_cycle": 20,
+                "ledger_max_pages": 400, "ledger_retry_s": 3600,
                 "url_template": "", "api_key_env": "WALLET_DATA_API_KEY",
                 "header": "Authorization", "header_prefix": "Bearer ",
                 "discover_enabled": True, "discovery_every_s": 21600,
@@ -65,7 +66,7 @@ def load_config(path="config.yaml"):
                 "max_wallets_per_run", "refresh_s", "max_age_s", "max_ledger_mb", "min_closed_cycles",
                 "min_closed_tokens", "min_history_days", "ledger_build_every_s",
                 "ledger_build_refresh_s", "ledgers_per_cycle", "ledger_max_pages",
-                "ledger_retry_s"):
+                "ledger_retry_s", "ledger_calls_per_cycle"):
         if type(w[key]) is not int or w[key] <= 0:
             raise ValueError(f"wallets.{key} must be a positive integer")
     if not 0 < w["max_censored_cost_fraction"] < 1:

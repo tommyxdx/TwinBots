@@ -105,8 +105,14 @@ def refresh_ledgers(cfg,store):
         return {"built":0,"pending":0}
     due.sort(key=lambda a: state.get(a,{}).get("at",0))
     helius,prices = Helius(),SolPrice(Path(cfg["data_dir"])/"downloads")
-    built = 0
+    built,screened,spent_at_start = 0,0,0
+    blocked = {}
     for address in due[:w["ledgers_per_cycle"]]:
+        # Rejections are cheap and full backfills are not, so the cycle is capped
+        # by calls spent rather than by wallets looked at.
+        if helius.calls-spent_at_start >= w["ledger_calls_per_cycle"]:
+            break
+        screened += 1
         path = folder/(address+".json")
         try:
             ledger,report = build(address,helius,prices,min_history_days=w["min_history_days"],
@@ -125,10 +131,14 @@ def refresh_ledgers(cfg,store):
         else:
             path.write_text(json.dumps(ledger,ensure_ascii=False),encoding="utf-8")
             built += 1
+        if not report.get("usable"):
+            reason = report.get("blocked_by","unknown")
+            blocked[reason] = blocked.get(reason,0)+1
         state[address] = {"at":now,**{k:v for k,v in report.items() if k!="address"}}
         store.set("wallet:build",state)
     store.set("heartbeat:ledgers",time.time())
-    return {"built":built,"pending":max(0,len(due)-w["ledgers_per_cycle"])}
+    return {"screened":screened,"built":built,"blocked":blocked,
+            "rpc_calls":helius.calls-spent_at_start,"pending":max(0,len(due)-screened)}
 
 
 async def ledger_loop(cfg,store):
@@ -136,7 +146,13 @@ async def ledger_loop(cfg,store):
     await asyncio.sleep(20)
     while True:
         try:
-            await asyncio.to_thread(refresh_ledgers,cfg,store)
+            result = await asyncio.to_thread(refresh_ledgers,cfg,store)
+            if result["screened"]:
+                # Progress has to be visible, or a slow queue reads as a hang.
+                reasons = ", ".join(f"{k} {v}" for k,v in sorted(result["blocked"].items()))
+                logging.info("Ledgers: screened %d, built %d, %d left, %d RPC calls%s",
+                             result["screened"],result["built"],result["pending"],
+                             result["rpc_calls"],f" ({reasons})" if reasons else "")
         except Exception as exc:
             logging.warning("Ledger refresh unavailable: %s",exc)
             store.event("ledger_build_error",{"type":type(exc).__name__})

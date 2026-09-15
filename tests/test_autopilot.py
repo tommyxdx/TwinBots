@@ -27,7 +27,8 @@ def env(tmp_path):
     cfg = load_config(ROOT / "config.example.yaml")
     cfg["data_dir"] = str(tmp_path)
     cfg["wallets"].update(ledger_dir=str(tmp_path / "ledgers"), addresses=[],
-                          ledgers_per_cycle=2, ledger_build_refresh_s=86400)
+                          ledgers_per_cycle=2, ledger_build_refresh_s=86400,
+                          ledger_calls_per_cycle=1000)
     store = Store(tmp_path)
     try:
         yield cfg, store, tmp_path / "ledgers"
@@ -39,13 +40,18 @@ def stub_builder(results, monkeypatch, calls=None):
     """Replace the adapter entry points the CLI imports lazily."""
     import adapters.helius, adapters.ledger, adapters.prices
 
+    class Counting:
+        def __init__(self):
+            self.calls = 0
+
     def build(address, helius, prices, **kwargs):
         if calls is not None:
             calls.append(address)
+        helius.calls += 2          # every screen costs something
         return results[address]
 
     monkeypatch.setattr(adapters.ledger, "build", build)
-    monkeypatch.setattr(adapters.helius, "Helius", lambda *a, **k: object())
+    monkeypatch.setattr(adapters.helius, "Helius", lambda *a, **k: Counting())
     monkeypatch.setattr(adapters.prices, "SolPrice", lambda *a, **k: object())
 
 
@@ -100,6 +106,66 @@ def test_rebuilds_are_bounded_and_rotate_oldest_first(env, monkeypatch):
     assert len(seen) == 2, "ledgers_per_cycle caps the spend per wake"
     refresh_ledgers(cfg, store)
     assert sorted(seen) == sorted([A, B, C]), "the untouched candidate comes next"
+
+
+def test_a_cheap_rejection_does_not_consume_a_whole_slot(env, monkeypatch):
+    """A distributor is refused in one call; a backfill costs dozens. Counting
+    wallets rather than calls made the cheap screens as expensive as the real
+    work and left a hundred candidates queued for hours."""
+    import adapters.helius, adapters.ledger, adapters.prices
+    cfg, store, _ = env
+    everyone = [A, B, C]
+    store.set("wallet:discovery:solana",
+              {"at": time.time(), "addresses": {a: 100 + i for i, a in enumerate(everyone)}})
+    cfg["wallets"].update(ledgers_per_cycle=25, ledger_calls_per_cycle=5)
+
+    class Counting:
+        def __init__(self):
+            self.calls = 0
+
+    seen = []
+
+    def build(address, helius, prices, **kwargs):
+        seen.append(address)
+        helius.calls += 1          # every candidate here is a one-call rejection
+        return None, {"address": address, "usable": False,
+                      "blocked_by": "buys_and_forwards_rather_than_trades"}
+
+    monkeypatch.setattr(adapters.ledger, "build", build)
+    monkeypatch.setattr(adapters.helius, "Helius", lambda *a, **k: Counting())
+    monkeypatch.setattr(adapters.prices, "SolPrice", lambda *a, **k: object())
+
+    result = refresh_ledgers(cfg, store)
+    assert len(seen) == 3, "all three fit inside the call budget"
+    assert result["screened"] == 3 and result["built"] == 0
+    assert result["blocked"] == {"buys_and_forwards_rather_than_trades": 3}
+
+
+def test_an_expensive_backfill_stops_the_cycle_at_its_budget(env, monkeypatch):
+    import adapters.helius, adapters.ledger, adapters.prices
+    cfg, store, _ = env
+    store.set("wallet:discovery:solana",
+              {"at": time.time(), "addresses": {a: 100 + i for i, a in enumerate([A, B, C])}})
+    cfg["wallets"].update(ledgers_per_cycle=25, ledger_calls_per_cycle=5)
+
+    class Counting:
+        def __init__(self):
+            self.calls = 0
+
+    seen = []
+
+    def build(address, helius, prices, **kwargs):
+        seen.append(address)
+        helius.calls += 40         # a full history walk
+        return ledger_for(address), {"address": address, "usable": True}
+
+    monkeypatch.setattr(adapters.ledger, "build", build)
+    monkeypatch.setattr(adapters.helius, "Helius", lambda *a, **k: Counting())
+    monkeypatch.setattr(adapters.prices, "SolPrice", lambda *a, **k: object())
+
+    result = refresh_ledgers(cfg, store)
+    assert len(seen) == 1, "one backfill exhausts the cycle"
+    assert result["pending"] == 2
 
 
 def test_a_fresh_ledger_is_not_rebuilt_until_it_goes_stale(env, monkeypatch):

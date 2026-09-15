@@ -65,14 +65,16 @@ wallets:
   # adapter: trusted GET endpoint returning that same complete ledger schema.
   source: chain
   ledger_dir: wallet_ledgers
-  # How often the builder wakes, how stale a ledger may get, and how many are
-  # rebuilt per wake. Each rebuild walks the wallet's whole history, so raise
-  # ledgers_per_cycle only once you have seen what one costs in rpc_calls.
+  # How often the builder wakes, and how stale a ledger may get before rebuild.
   ledger_build_every_s: 600
   ledger_build_refresh_s: 86400
   # A build that errored is retried sooner than one that actually reconstructed.
   ledger_retry_s: 3600
-  ledgers_per_cycle: 3
+  # A cycle stops at whichever comes first. Most candidates are rejected in one
+  # or two calls, so the call budget is what actually binds; the wallet count is
+  # only a safety net. 20 calls per 10 minutes stays inside a free Helius tier.
+  ledgers_per_cycle: 25
+  ledger_calls_per_cycle: 20
   ledger_max_pages: 400
   addresses: []
   url_template: ""  # Optional {network} and {address}; NOT a raw PnL API URL.
