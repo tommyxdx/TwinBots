@@ -28,6 +28,99 @@ def output(data):
     print(json.dumps(data,ensure_ascii=False,indent=2,allow_nan=False))
 
 
+def candidates(cfg,store):
+    """Addresses worth a ledger: the configured list plus whatever discovery found."""
+    found = store.get(f"wallet:discovery:{cfg['scanner']['network']}",{}).get("addresses",{})
+    ordered = sorted(found,key=lambda a:(-found[a],a))
+    return list(dict.fromkeys(cfg["wallets"]["addresses"]+ordered))[:cfg["wallets"]["max_candidates"]]
+
+
+def refresh_ledgers(cfg,store):
+    """Rebuild a few ledgers from chain per cycle, newest attempt last.
+
+    Failures are recorded with their reason so the report shows the real
+    rejection mix without anyone running a separate diagnostic pass.
+    """
+    from adapters.helius import Helius
+    from adapters.ledger import build
+    from adapters.prices import SolPrice
+    w = cfg["wallets"]
+    folder = Path(w["ledger_dir"])
+    folder.mkdir(parents=True,exist_ok=True)
+    state = store.get("wallet:build",{})
+    now = time.time()
+    due = [a for a in candidates(cfg,store)
+           if now-state.get(a,{}).get("at",0) >= w["ledger_build_refresh_s"]]
+    if not due:
+        return {"built":0,"pending":0}
+    due.sort(key=lambda a: state.get(a,{}).get("at",0))
+    helius,prices = Helius(),SolPrice(Path(cfg["data_dir"])/"downloads")
+    built = 0
+    for address in due[:w["ledgers_per_cycle"]]:
+        path = folder/(address+".json")
+        try:
+            ledger,report = build(address,helius,prices,min_history_days=w["min_history_days"],
+                                  max_pages=w["ledger_max_pages"])
+        except Exception as exc:
+            state[address] = {"at":now,"usable":False,"error":f"{type(exc).__name__}"}
+            store.set("wallet:build",state)
+            continue
+        if ledger is None:
+            # A wallet that stopped qualifying must not keep ranking on stale data.
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(json.dumps(ledger,ensure_ascii=False),encoding="utf-8")
+            built += 1
+        state[address] = {"at":now,**{k:v for k,v in report.items() if k!="address"}}
+        store.set("wallet:build",state)
+    store.set("heartbeat:ledgers",time.time())
+    return {"built":built,"pending":max(0,len(due)-w["ledgers_per_cycle"])}
+
+
+async def ledger_loop(cfg,store):
+    # Discovery runs in the scanner, so there is nothing to build on the first tick.
+    await asyncio.sleep(20)
+    while True:
+        try:
+            await asyncio.to_thread(refresh_ledgers,cfg,store)
+        except Exception as exc:
+            logging.warning("Ledger refresh unavailable: %s",exc)
+            store.event("ledger_build_error",{"type":type(exc).__name__})
+        await asyncio.sleep(cfg["wallets"]["ledger_build_every_s"])
+
+
+async def activity_loop(cfg,store):
+    """Keep the followed leaders' fill feeds fresh; the copy trader reads the files."""
+    from adapters.activity import poll_once
+    from adapters.helius import Helius
+    from adapters.prices import SolPrice
+    f,client = cfg["follow"],None
+    while True:
+        try:
+            leaders = (store.get("copy:leaders") or {}).get("addresses",[])
+            if leaders:
+                # Built on first use so a missing key idles this loop instead of
+                # taking down the venues running alongside it.
+                if client is None:
+                    client = (Helius(),SolPrice(Path(cfg["data_dir"])/"downloads"))
+                await asyncio.to_thread(poll_once,leaders,client[0],client[1],
+                                        f["activity_dir"],f["activity_lookback_s"])
+                store.set("heartbeat:activity",time.time())
+        except Exception as exc:
+            logging.warning("Leader activity unavailable: %s",exc)
+            store.event("activity_poll_error",{"type":type(exc).__name__})
+        await asyncio.sleep(f["activity_poll_s"])
+
+
+async def report_loop(cfg,store,every_s=3600):
+    while True:
+        await asyncio.sleep(every_s)
+        try:
+            await asyncio.to_thread(export_report,cfg,store)
+        except Exception as exc:
+            logging.warning("Report export failed: %s",exc)
+
+
 def parser():
     p = argparse.ArgumentParser(description="TwinCryptoBots — scanner + paper trading, no real orders")
     p.add_argument("--config",default="config.yaml")
@@ -125,6 +218,12 @@ async def services(args,cfg,store,http,fetcher):
         tasks = [] if wallet_scan_only else [asyncio.create_task(maintenance_loop(cfg,store,fetcher))]
         if use_scan:
             tasks.append(asyncio.create_task(scanner_loop(scanner,cfg)))
+            if wallet_mode and cfg["wallets"]["source"]=="chain":
+                tasks.append(asyncio.create_task(ledger_loop(cfg,store)))
+        if "copy" in venues and cfg["follow"]["source"]=="local" and cfg["wallets"]["source"]=="chain":
+            tasks.append(asyncio.create_task(activity_loop(cfg,store)))
+        if args.command=="run":
+            tasks.append(asyncio.create_task(report_loop(cfg,store)))
         if "cex" in venues:
             tasks.append(asyncio.create_task(CexPaper(cfg,store,http,fetcher).run()))
         if "dex" in venues:

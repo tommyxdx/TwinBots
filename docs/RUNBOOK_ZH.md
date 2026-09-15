@@ -42,10 +42,11 @@ scanner:
   network: solana
 
 wallets:
-  source: local          # 适配器写文件到本地，不需要 adapter 模式
+  source: chain          # 程序自己从链上还原账本，不用单独跑适配器
   ledger_dir: wallet_ledgers
   discover_enabled: true # 自动从新池成交发现候选地址
   max_candidates: 50
+  ledgers_per_cycle: 3   # 每轮还原几个，先小后大
 
 follow:
   enabled: true          # 默认 false，跟单要打开
@@ -68,81 +69,56 @@ cex:
 ## 三、先离线验证，不花一分钱
 
 ```bash
-python -m pytest tests/ -q      # 128 项
-python -m examples.copy_demo    # 合成数据跑通"排名 → 选领投 → 跟单"全链路
+python -m pytest tests/ -q
+python -m examples.copy_demo
 ```
 
-`copy_demo` 会输出四个合成钱包的排名、被选中的领投、开仓时的跟单延迟，以及一个 HTML 报告路径。确认这一步能跑通再往下，否则后面出问题分不清是数据还是程序。
+`copy_demo` 用合成数据跑通"排名 → 选领投 → 跟单"全链路，输出四个钱包的排名、被选中的领投和开仓延迟。确认这步能跑通再往下，否则出问题分不清是数据还是程序。
 
-## 四、接真实数据
-
-### 4.1 先诊断，不要一上来就批量拉
+## 四、接真实数据：一条命令
 
 ```bash
-python -m adapters.ledger --diagnose \
-  --address <钱包1> --address <钱包2> --address <钱包3>
+python -m twobots run
 ```
 
-`--diagnose` 不写文件、不调 Jupiter，只告诉你每个钱包能不能用、被什么挡住、消耗了多少 `rpc_calls`。输出里的 `rejection_rate` 就是你这批候选的实际拒绝率。
+只要 `.env` 里有 `HELIUS_API_KEY`、`config.yaml` 里 `wallets.source: chain` 且 `follow.enabled: true`，这一条命令就会持续做完整循环：
 
-**先用 3~5 个钱包试，看清单次 `rpc_calls` 再放量。** 很老的钱包要从第一笔交易拉起，单个可能消耗上万 credits。
+1. 从 GeckoTerminal 新池成交发现候选地址
+2. 逐批从链上还原候选钱包的完整账本（每轮 `ledgers_per_cycle` 个，默认 3）
+3. 排名，把不合格的标为观察
+4. 从合格钱包里选领投，拉它们的实时成交流
+5. 跟单到独立模拟账户，止损/移动止盈/超时/回撤熔断照常生效
+6. 每小时导出一次报告
 
-### 4.2 候选地址从哪来
+没有 Helius Key 时，账本还原和成交流会每轮记一条警告后跳过，其余部分照常运行——不会整个崩掉。
 
-三个来源，可以混用：
+### 候选地址从哪来
 
-- **自动发现**：`wallets.discover_enabled: true` 时，扫描器每 6 小时从 GeckoTerminal 新池成交里取发送地址。免费，但**样本偏向新币狙击者**，正是你想避开的那类。
-- **手填**：`wallets.addresses: [地址1, 地址2]`，适合你已经从 Solscan、GMGN、Dune 之类看好的钱包。
-- **本地文件**：直接把账本 JSON 放进 `wallet_ledgers/`，文件名必须等于内容里的 `address`。
+三个来源可以混用：
 
-### 4.3 生成账本
+- **自动发现**：`wallets.discover_enabled: true`，每 6 小时从新池成交取发送地址。免费，但**样本偏向新币狙击者**。
+- **手填**：`wallets.addresses: [地址1, 地址2]`，排在自动发现结果前面优先还原。
+- **现成账本**：直接把 JSON 放进 `wallet_ledgers/`，文件名等于内容里的 `address`。
+
+### 拒绝率直接看报告
+
+报告里"账本还原"一节给出已检查数、可用数、拒绝率和拒绝原因分布，不需要单独跑诊断。想在开跑前先摸底几个地址，仍可以单独调：
 
 ```bash
-python -m adapters.ledger --address <钱包> --out wallet_ledgers
+python -m adapters.ledger --diagnose --address <钱包1> --address <钱包2>
 ```
 
-能用就写文件并打印统计，不能用就打印原因、**不写文件**。批量就重复 `--address`。
+### 费用先摸底再放量
 
-### 4.4 产出排名
+每个钱包的账本还原要走完它的全部历史，老钱包单个可能上万 credits。`ledgers_per_cycle` 默认 3、`ledger_build_refresh_s` 默认一天，就是为了让你先看清一个钱包实际花多少。报告里有 `rpc_calls`，看清楚再往上调。
 
-```bash
-python -m twobots scan --once
-python -m twobots report
-```
+领投的成交流按 `follow.activity_poll_s`（默认 30 秒）轮询，**每个领投每轮一次调用**。跟 3 个领投约 260 万 credits/月，已经超免费档；跟更多就得用 webhook（每次推送 1 credit），见 [DATA_SOURCES.md](DATA_SOURCES.md)。
 
-报告里会列出每个钱包的已实现盈亏、已售成本收益率、完整平仓数、胜率、Profit Factor、去掉最大盈利币后的盈亏、未平仓亏损和研究分数。`status: observation` 的是被拒绝的，不会被跟单。
+### 想跟更多钱包
 
-**看一眼分数分布再回头调 `follow.min_score`。** 默认的 10 是拍的，真实分数分布未知。
+`follow.max_leaders` 最高 200，但**真正的瓶颈是 `max_positions`**：领投再多，同时只能持有 `max_positions` 个仓位，其余信号直接丢弃。结果不是"跟前 100 名"，而是"跟恰好在我有空位时开仓的那个"——这会偏向高频钱包，而不是排名高的钱包。
 
-### 4.5 起实时成交流
-
-轮询模式最简单：
-
-```bash
-python -m adapters.activity poll --data-dir data --out wallet_activity --watch --interval 30
-```
-
-领投名单直接从 bot 的 `state.sqlite3` 读，所以要先跑过一次 `scan` 和跟单 bot。这个进程要一直开着。
-
-**30 秒轮询 3 个领投约 260 万 credits/月，超免费档。** 认真跑就用 webhook（每次推送 1 credit，约 9 千/月），见 [DATA_SOURCES.md](DATA_SOURCES.md)。
-
-### 4.6 跑跟单
-
-另开一个终端：
-
-```bash
-python -m twobots trade --venue copy
-```
-
-或者 `python -m twobots run`，会按 `enabled` 自动带上扫描器和所有开启的 venue。
-
-### 4.7 看结果
-
-```bash
-python -m twobots report
-```
-
-HTML 报告里"跟单来源"一节给出当前跟随的钱包、入场信号数、成交数和**跟单延迟中位数**。`COPY 独立模拟账户`一节给出现金、净值和持仓数。
+所以两个要一起调。配置校验会在 `max_leaders > max_positions × 20` 时直接报错，就是为了挡住这个误配。模拟盘本金是虚拟的，为了更快攒够样本，可以把 `initial_cash`、`max_positions`、`max_leaders` 按比例一起放大。
 
 ## 五、怎么判断有没有 edge
 
@@ -185,22 +161,8 @@ HTML 报告里"跟单来源"一节给出当前跟随的钱包、入场信号数�
 ## 六、每天的常规循环
 
 ```bash
-# 终端 1：实时成交流，一直开着
-python -m adapters.activity poll --data-dir data --out wallet_activity --watch
-
-# 终端 2：扫描器 + 跟单，一直开着
-python -m twobots run
-
-# 终端 3：定期看
-python -m twobots report
+python -m twobots run      # 一直开着，其余都是它自己做
+python -m twobots report   # 想看的时候单独跑，不影响上面那个
 ```
 
-账本每周重新生成一次就够——重新拉链上数据是适配器的事，扫描器只负责读文件：
-
-```bash
-python -m adapters.ledger --address <钱包1> --address <钱包2> --out wallet_ledgers
-```
-
-`source: local` 时扫描器每轮都会重读文件，所以新账本很快生效。但每轮只处理 `wallets.max_wallets_per_run` 个（默认 2），配合 `scanner.poll_s: 600`，50 个钱包要轮 4 个多小时才转一圈。本地读文件不消耗 API，账本多就把 `max_wallets_per_run` 调大。
-
-注意 `follow.enabled: true` 但没有合格领投时，跟单 bot 什么都不做，报告里"跟单来源"会显示"当前跟随 0 个钱包：无合格钱包"——这是正常的，不是故障。常见原因是所有候选都被排名拒绝了，或者分数都低于 `min_score`。
+`follow.enabled: true` 但没有合格领投时，跟单 bot 什么都不做，报告里"跟单来源"显示"当前跟随 0 个钱包：无合格钱包"——这是正常的。常见原因是候选还没还原出账本、全被排名拒绝了，或者分数都低于 `min_score`。先看报告里"账本还原"一节的拒绝原因分布。

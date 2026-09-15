@@ -59,10 +59,19 @@ scanner:
     - {name: x10_7d, multiple: 10, horizon_hours: 168}
     - {name: x100_30d, multiple: 100, horizon_hours: 720}
 wallets:
-  # local: <ledger_dir>/<Solana address>.json, schema in docs/WALLET_DATA.md.
+  # chain: `twobots run` rebuilds ledgers itself from on-chain history (needs
+  #        HELIUS_API_KEY in .env; nothing else to launch).
+  # local: <ledger_dir>/<Solana address>.json you supply, schema in docs/WALLET_DATA.md.
   # adapter: trusted GET endpoint returning that same complete ledger schema.
-  source: local
+  source: chain
   ledger_dir: wallet_ledgers
+  # How often the builder wakes, how stale a ledger may get, and how many are
+  # rebuilt per wake. Each rebuild walks the wallet's whole history, so raise
+  # ledgers_per_cycle only once you have seen what one costs in rpc_calls.
+  ledger_build_every_s: 600
+  ledger_build_refresh_s: 86400
+  ledgers_per_cycle: 3
+  ledger_max_pages: 400
   addresses: []
   url_template: ""  # Optional {network} and {address}; NOT a raw PnL API URL.
   api_key_env: WALLET_DATA_API_KEY
@@ -97,6 +106,10 @@ follow:
   header_prefix: "Bearer "
   max_leaders: 3
   min_score: 10
+  # Leader fills are polled on this interval when wallets.source is chain.
+  # Every leader costs one call per tick, so widening max_leaders multiplies it.
+  activity_poll_s: 30
+  activity_lookback_s: 900
   # Flags that still admit a leader. Empty means only unflagged wallets are copied;
   # ranking already refuses insufficient samples and wallets down on open inventory.
   allowed_flags: []

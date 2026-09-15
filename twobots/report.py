@@ -33,6 +33,19 @@ def build_report(cfg,store):
                            "forward_metrics": performance,
                            "capital_scope":"Separate hypothetical account; do not add CEX and DEX returns as one $100 portfolio"}
     scans = store.rows("SELECT payload FROM scans ORDER BY id DESC LIMIT 20")
+    builds = store.get("wallet:build") or {}
+    usable = sum(1 for b in builds.values() if b.get("usable"))
+    blocked = {}
+    for entry in builds.values():
+        if entry.get("usable"):
+            continue
+        reason = entry.get("blocked_by") or entry.get("error") or "pending"
+        blocked[reason] = blocked.get(reason, 0) + 1
+    ledger_builds = {"checked": len(builds), "usable": usable,
+                     "rejection_rate": round(1 - usable / len(builds), 3) if builds else None,
+                     "blocked_by": dict(sorted(blocked.items(), key=lambda kv: -kv[1])),
+                     "rpc_calls_last_seen": max((b.get("rpc_calls", 0) for b in builds.values()),
+                                                default=0)} if builds else None
     wallet_report = store.get("wallet:latest")
     if wallet_report is not None:
         wallet_report["report_age_s"] = time.time() - wallet_report["generated_at"]
@@ -40,6 +53,7 @@ def build_report(cfg,store):
             time.time() - row["asof"] > cfg["wallets"]["max_age_s"] for row in wallet_report["ranking"])
     return {"generated_at":time.time(),"mode":"PAPER_ONLY","accounts":accounts,
             "scanner_kind":cfg["scanner"]["kind"], "wallet_scanner":wallet_report,
+            "ledger_builds":ledger_builds,
             "scanner_latest":[json.loads(x["payload"]) for x in scans] if cfg["scanner"]["kind"] == "tokens" else [],
             "model_cex":store.get("model:cex"),"model_scanner":store.get("model:scanner"),
             "history_bootstrap":store.get("bootstrap:report"),"cohort":store.get("history:cohort_report"),
@@ -101,6 +115,15 @@ def export_report(cfg,store):
                      + f"数据不足的钱包：{len(wallets['unavailable'])} 个。</p><div style='overflow-x:auto'><table><thead><tr>"
                      + "".join("<th>" + h + "</th>" for h in headings) + "</tr></thead><tbody>"
                      + "".join(rows) + "</tbody></table></div></section>")
+    builds = report["ledger_builds"]
+    if builds:
+        reasons = "、".join(f"{k} {v}" for k, v in builds["blocked_by"].items()) or "无"
+        cards.append("<section><h2>账本还原</h2><p>已检查 "
+                     + f"{builds['checked']} 个候选，可用 {builds['usable']} 个，拒绝率 "
+                     + (f"{builds['rejection_rate']:.1%}" if builds["rejection_rate"] is not None else "—")
+                     + "。</p><p>拒绝原因：" + html.escape(reasons)
+                     + "。转入、转出、代币互换和批量卖出都已入账，不构成拒绝；"
+                     + "剩下的主要是一笔买入多个代币和历史太短。</p></section>")
     leaders = report["copy_leaders"]
     if cfg["follow"]["enabled"] and leaders is not None:
         entries = [json.loads(row["payload"]) for row in report["recent_copy_entries"]]

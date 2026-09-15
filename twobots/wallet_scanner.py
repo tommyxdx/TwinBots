@@ -51,7 +51,7 @@ class WalletScanner:
         return addresses
 
     def read_ledger(self, address):
-        if self.c["source"] == "local":
+        if self.c["source"] in ("chain", "local"):
             path = Path(self.c["ledger_dir"]) / (address + ".json")
             with path.open("rb") as handle:
                 raw = handle.read(self.c["max_ledger_mb"] * 1024 * 1024 + 1)
@@ -69,15 +69,16 @@ class WalletScanner:
         now = time.time()
         discovered = self.discover(now)
         local = []
-        if self.c["source"] == "local":
+        if self.c["source"] in ("chain", "local"):
             folder = Path(self.c["ledger_dir"])
             if folder.is_dir():
                 local = sorted(p.stem for p in folder.glob("*.json") if valid_address(p.stem))[:self.c["max_candidates"]]
         addresses = list(dict.fromkeys(self.c["addresses"] + local + list(discovered)))[:self.c["max_candidates"]]
         states = {a: self.store.get(self.key(a), {}) for a in addresses}
         due = [a for a in addresses if now - states[a].get("attempted_at", 0) >= self.c["refresh_s"]]
-        # For local inputs no API is consumed, and edits can be checked immediately.
-        if self.c["source"] == "local":
+        # Reading local files consumes no API, so edits and freshly built
+        # ledgers are picked up on the next cycle instead of on a timer.
+        if self.c["source"] in ("chain", "local"):
             due = list(addresses)
         due.sort(key=lambda a: (states[a].get("attempted_at", 0), a))
         for address in due[:self.c["max_wallets_per_run"]]:

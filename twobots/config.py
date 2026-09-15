@@ -36,7 +36,9 @@ def load_config(path="config.yaml"):
     cfg["scanner"].setdefault("kind", "wallets")
     if cfg["scanner"]["kind"] not in ("wallets", "tokens"):
         raise ValueError("scanner.kind must be wallets or tokens")
-    defaults = {"source": "local", "ledger_dir": "wallet_ledgers", "addresses": [],
+    defaults = {"source": "chain", "ledger_dir": "wallet_ledgers", "addresses": [],
+                "ledger_build_every_s": 600, "ledger_build_refresh_s": 86400,
+                "ledgers_per_cycle": 3, "ledger_max_pages": 400,
                 "url_template": "", "api_key_env": "WALLET_DATA_API_KEY",
                 "header": "Authorization", "header_prefix": "Bearer ",
                 "discover_enabled": True, "discovery_every_s": 21600,
@@ -46,14 +48,17 @@ def load_config(path="config.yaml"):
                 "min_closed_cycles": 10, "min_closed_tokens": 3,
                 "max_censored_cost_fraction": 0.25}
     w = cfg["wallets"] = {**defaults, **cfg.get("wallets", {})}
-    if w["source"] not in ("local", "adapter") or type(w["discover_enabled"]) is not bool:
+    # chain builds the ledgers itself from on-chain history; local reads files you
+    # supply; adapter fetches them from a service you run.
+    if w["source"] not in ("chain", "local", "adapter") or type(w["discover_enabled"]) is not bool:
         raise ValueError("Invalid wallet source/discovery configuration")
     from .wallets import BLOCKING_FLAGS, WALLET_FLAGS, valid_address
     if not isinstance(w["addresses"], list) or any(not valid_address(a) for a in w["addresses"]):
         raise ValueError("wallets.addresses must be a list of Solana public addresses")
     for key in ("discovery_every_s", "discovery_max_pools", "discovery_addresses_per_pool", "max_candidates",
                 "max_wallets_per_run", "refresh_s", "max_age_s", "max_ledger_mb", "min_closed_cycles",
-                "min_closed_tokens", "min_history_days"):
+                "min_closed_tokens", "min_history_days", "ledger_build_every_s",
+                "ledger_build_refresh_s", "ledgers_per_cycle", "ledger_max_pages"):
         if type(w[key]) is not int or w[key] <= 0:
             raise ValueError(f"wallets.{key} must be a positive integer")
     if not 0 < w["max_censored_cost_fraction"] < 1:
@@ -70,6 +75,7 @@ def load_config(path="config.yaml"):
                        "url_template": "", "api_key_env": "WALLET_ACTIVITY_API_KEY",
                        "header": "Authorization", "header_prefix": "Bearer ",
                        "max_leaders": 3, "min_score": 10.0, "allowed_flags": [],
+                       "activity_poll_s": 30, "activity_lookback_s": 900,
                        "ranking_max_age_s": 21600, "max_feed_age_s": 300, "max_signal_age_s": 120,
                        "min_leader_notional_usd": 50.0, "seen_memory": 5000, "cooldown_s": 3600,
                        "mirror_exits": True, "max_activity_mb": 4,
@@ -83,7 +89,8 @@ def load_config(path="config.yaml"):
         raise ValueError("follow.enabled requires scanner.kind: wallets to produce a ranking")
     for key in ("max_leaders", "ranking_max_age_s", "max_feed_age_s", "max_signal_age_s",
                 "seen_memory", "cooldown_s", "max_activity_mb", "max_positions",
-                "max_hold_hours", "poll_s", "mark_every_s"):
+                "max_hold_hours", "poll_s", "mark_every_s", "activity_poll_s",
+                "activity_lookback_s"):
         if type(f[key]) is not int or f[key] <= 0:
             raise ValueError(f"follow.{key} must be a positive integer")
     if not isinstance(f["allowed_flags"], list) or not set(f["allowed_flags"]) <= set(WALLET_FLAGS):
@@ -94,8 +101,13 @@ def load_config(path="config.yaml"):
         raise ValueError("Invalid follow capital/ticket/notional configuration")
     if not 0 < f["max_drawdown"] < 1 or not 0 < f["stop_fraction"] < 1 or not 0 < f["trail_fraction"] < 1:
         raise ValueError("Invalid follow drawdown/stop/trailing fraction")
-    if f["max_activity_mb"] > 64 or f["max_leaders"] > 50:
+    if f["max_activity_mb"] > 64 or f["max_leaders"] > 200:
         raise ValueError("Follow activity/leader limits exceeded")
+    # Every leader is polled or pushed separately, and each concurrent position
+    # needs its own ticket, so a wide leader set is not free in either currency.
+    if f["max_leaders"] > f["max_positions"] * 20:
+        raise ValueError("follow.max_leaders far exceeds max_positions; most signals "
+                         "would be dropped for lack of a free slot")
     if f["max_signal_age_s"] > f["max_feed_age_s"]:
         raise ValueError("follow.max_signal_age_s cannot exceed follow.max_feed_age_s")
     f["activity_dir"] = str((path.parent / f["activity_dir"]).resolve())
