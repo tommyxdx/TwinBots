@@ -126,15 +126,32 @@ def suggest_paths(payload, prefix="", found=None, depth=0):
     return found
 
 
+# A mint, a pool and a wallet are all 32-byte base58, so shape alone cannot tell
+# them apart. These segments name the things that are not wallets.
+NOT_A_WALLET = ("token", "mint", "pool", "base", "quote", "market", "pair",
+                "program", "vault", "lp", "from", "to")
+
+
+def looks_like_a_wallet(path):
+    return not any(any(word in segment for word in NOT_A_WALLET)
+                   for segment in path.replace("[]", "").split("."))
+
+
 def probe(url, headers, http, params=None):
-    """-> (suggested address paths, top-level keys). For wiring up a new source."""
+    """-> (wallet-ish paths, other address paths, top-level keys).
+
+    Feeding a token mint into a wallet ranker produces confident nonsense, so
+    paths naming something other than a wallet are separated out rather than
+    ranked alongside.
+    """
     resolved, missing = headers_for({"headers": headers})
     if missing:
         raise PermissionError("missing " + ", ".join(missing))
     payload = json.loads(http.request(url, params, resolved, max_bytes=16 * 1024 * 1024))
-    paths = suggest_paths(payload)
-    return (dict(sorted(paths.items(), key=lambda kv: -kv[1])),
-            sorted(payload) if isinstance(payload, dict) else ["<list>"])
+    ranked = sorted(suggest_paths(payload).items(), key=lambda kv: -kv[1])
+    wallets = {p: n for p, n in ranked if looks_like_a_wallet(p)}
+    others = {p: n for p, n in ranked if not looks_like_a_wallet(p)}
+    return wallets, others, sorted(payload) if isinstance(payload, dict) else ["<list>"]
 
 
 def collect(sources, http, now=None):

@@ -131,18 +131,41 @@ def test_probe_finds_the_address_path_without_reading_any_docs():
         {"address": A, "pnl": 10, "network": "solana"},
         {"address": B, "pnl": 5, "network": "solana"}]}}
     http = StubHTTP({"https://p/": birdeye_shaped})
-    paths, keys = probe("https://p/", {}, http)
-    assert paths == {"data.items[].address": 2}
-    assert keys == ["data", "success"]
+    wallets, others, keys = probe("https://p/", {}, http)
+    assert wallets == {"data.items[].address": 2}
+    assert others == {} and keys == ["data", "success"]
 
 
 def test_probe_ranks_the_richest_path_first():
     """A response can carry several address-shaped fields; the list is the one wanted."""
     from adapters.shortlist import probe
     payload = {"owner": A, "data": [{"wallet": B}, {"wallet": C}, {"wallet": A}]}
-    paths, _ = probe("https://p/", {}, StubHTTP({"https://p/": payload}))
-    assert list(paths)[0] == "data[].wallet"
-    assert paths["data[].wallet"] == 3 and paths["owner"] == 1
+    wallets, _, _ = probe("https://p/", {}, StubHTTP({"https://p/": payload}))
+    assert list(wallets)[0] == "data[].wallet"
+    assert wallets["data[].wallet"] == 3 and wallets["owner"] == 1
+
+
+def test_probe_separates_token_and_pool_addresses_from_wallets():
+    """Measured against a real Birdeye trades response: a mint, a pool and a
+    wallet are all 32-byte base58, and feeding a mint to the ranker is silent
+    nonsense rather than an error."""
+    from adapters.shortlist import probe
+    trades_shaped = {"data": {"items": [
+        {"owner": A, "poolId": B, "base": {"address": C}, "quote": {"address": B},
+         "from": {"address": C}, "to": {"address": A}}]}}
+    wallets, others, _ = probe("https://p/", {}, StubHTTP({"https://p/": trades_shaped}))
+    assert list(wallets) == ["data.items[].owner"]
+    assert set(others) == {"data.items[].poolId", "data.items[].base.address",
+                           "data.items[].quote.address", "data.items[].from.address",
+                           "data.items[].to.address"}
+
+
+def test_probe_keeps_a_token_field_out_of_the_wallet_bucket():
+    from adapters.shortlist import probe
+    top_traders = {"data": {"items": [{"owner": A, "tokenAddress": B}]}}
+    wallets, others, _ = probe("https://p/", {}, StubHTTP({"https://p/": top_traders}))
+    assert list(wallets) == ["data.items[].owner"]
+    assert list(others) == ["data.items[].tokenAddress"]
 
 
 def test_probe_without_the_key_says_so_instead_of_calling(monkeypatch):

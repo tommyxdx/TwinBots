@@ -372,9 +372,11 @@ def main(argv=None):
                 from adapters.shortlist import probe
                 headers = dict(h.split(":",1) for h in args.header)
                 params = dict(p.split("=",1) for p in args.param)
-                paths,keys = probe(args.probe,headers,http,params or None)
-                output({"top_level_keys":keys,"address_path_candidates":paths,
-                        "next":"Put the path with the most addresses in address_path"})
+                wallets,others,keys = probe(args.probe,headers,http,params or None)
+                output({"top_level_keys":keys,"wallet_path_candidates":wallets,
+                        "not_wallets":others,
+                        "next":"Use a wallet_path_candidates entry; confirm the field means "
+                               "a trader, not a token or pool"})
             else:
                 output(refresh_shortlist(cfg,store,http))
         elif args.command=="report":

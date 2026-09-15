@@ -68,11 +68,34 @@ python -m twobots shortlist --probe "https://public-api.birdeye.so/<接口路径
 }
 ```
 
-**把地址最多的那条路径填进 `address_path` 即可。** `--header NAME:env:VAR` 从 `.env` 读 Key，不用把密钥打在命令行里。
+`--header NAME:env:VAR` 从 `.env` 读 Key，不用把密钥打在命令行里。
+
+**注意 `not_wallets` 那一栏。** 代币 mint、池子地址和钱包地址都是 32 字节 base58，光看形状分不出来。比如 Birdeye 的成交流水接口会同时返回 `owner`（钱包）、`base.address` / `quote.address`（代币）和 `poolId`（池子）——**把代币 mint 当钱包喂进排名器不会报错，只会安静地算出一堆没有意义的结果**。所以按字段名分成了两栏，只从 `wallet_path_candidates` 里选，并确认那个字段确实指交易者。
 
 ### Birdeye
 
-top traders 类接口，`X-API-KEY` 加 `x-chain: solana`。用上面的 `--probe` 确定 `address_path`。
+接口路径在 [docs.birdeye.so](https://docs.birdeye.so/) 的 reference 章节。**但文档站改过版、链接会失效，而且能不能调取决于你的套餐——直接用 `--probe` 打一次比查文档准。**
+
+2026-09 用真实 Key 实测通过的三个（全部 `X-API-KEY` + `x-chain: solana`）：
+
+| 路径 | 是什么 | 钱包字段 |
+|---|---|---|
+| `/trader/gainers-losers` | 全局盈亏榜 | `data.items[].address` |
+| `/defi/v2/tokens/top_traders` | 某个代币的顶级交易者 | `data.items[].owner` |
+| `/defi/txs/token` | 某个代币的成交流水 | `data.items[].owner` |
+
+**做粗筛用第一个**——它直接就是按盈亏排的交易者榜，不用先选代币。可直接粘贴：
+
+```yaml
+    - name: birdeye
+      kind: http
+      url: https://public-api.birdeye.so/trader/gainers-losers
+      headers: {X-API-KEY: "env:BIRDEYE_API_KEY", x-chain: solana}
+      params: {type: 1W, sort_by: PnL, sort_type: desc, limit: 100}
+      address_path: data.items[].address
+```
+
+`type` 可选 `1D` / `1W` / `1M`。注意它的 PnL 口径和本程序的排名完全不同，这里只用它来决定"哪些地址值得花 RPC 去查"。
 
 ### Solscan Pro
 
