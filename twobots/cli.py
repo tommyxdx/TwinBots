@@ -43,10 +43,22 @@ def candidates(cfg,store):
     return list(dict.fromkeys(ordered))[:cfg["wallets"]["max_candidates"]]
 
 
+KNOWN_PROVIDER_KEYS = ("DUNE_API_KEY","BIRDEYE_API_KEY","SOLSCAN_API_KEY")
+
+
 def refresh_shortlist(cfg,store,http):
     """Pull candidate addresses from the configured providers and merge them."""
     from adapters.shortlist import collect,rank_by_agreement
-    merged,report = collect(cfg["shortlist"]["sources"],http)
+    sources = cfg["shortlist"]["sources"]
+    if not sources:
+        # A key in .env does nothing on its own: something has to say which
+        # endpoint to call and where the addresses sit in its response.
+        hint = "No sources under shortlist: in config.yaml"
+        present = [k for k in KNOWN_PROVIDER_KEYS if os.getenv(k)]
+        if present:
+            hint += f" ({', '.join(present)} is set, but no source uses it)"
+        return {"addresses":0,"sources":[],"hint":hint}
+    merged,report = collect(sources,http)
     addresses = rank_by_agreement(merged,cfg["shortlist"]["max_addresses"])
     store.set("wallet:shortlist",{"at":time.time(),"addresses":addresses,
                                   "sources":{a:merged[a]["sources"] for a in addresses},
@@ -185,7 +197,13 @@ def parser():
     r = commands.add_parser("run",help="Scanner + enabled paper venues + hourly maintenance")
     r.add_argument("--close-positions",action="store_true",
                    help="Sell everything before exiting instead of keeping it open")
-    commands.add_parser("shortlist",help="Query the candidate providers once and print the merge")
+    sl = commands.add_parser("shortlist",help="Query the candidate providers once and print the merge")
+    sl.add_argument("--probe",metavar="URL",
+                    help="Fetch one URL and report which paths hold Solana addresses")
+    sl.add_argument("--header",action="append",default=[],metavar="NAME:VALUE",
+                    help="Header for --probe; use NAME:env:VAR to read a key from .env")
+    sl.add_argument("--param",action="append",default=[],metavar="NAME=VALUE",
+                    help="Query parameter for --probe")
     commands.add_parser("report")
     demo = commands.add_parser("demo",help="Offline synthetic behavior demo, never performance evidence")
     demo.add_argument("--output",default="demo_output")
@@ -350,7 +368,15 @@ def main(argv=None):
         if args.command=="doctor":
             output(doctor(cfg,store,http,args.online))
         elif args.command=="shortlist":
-            output(refresh_shortlist(cfg,store,http))
+            if args.probe:
+                from adapters.shortlist import probe
+                headers = dict(h.split(":",1) for h in args.header)
+                params = dict(p.split("=",1) for p in args.param)
+                paths,keys = probe(args.probe,headers,http,params or None)
+                output({"top_level_keys":keys,"address_path_candidates":paths,
+                        "next":"Put the path with the most addresses in address_path"})
+            else:
+                output(refresh_shortlist(cfg,store,http))
         elif args.command=="report":
             output({"report":export_report(cfg,store)})
         elif args.command=="train":

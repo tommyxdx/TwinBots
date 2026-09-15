@@ -50,19 +50,33 @@ python -m twobots shortlist
 
 `address_path` 填 `result.rows[].你的列名`。
 
-### Birdeye
+### 不知道 address_path 填什么？让程序自己找
 
-有 top traders 类接口，`X-API-KEY` 加 `x-chain: solana`。
-
-**先用 curl 打一次看真实返回**再填 `address_path`，我没有 Key，没法替你验证字段名：
+**不用查文档、不用猜字段名。** `--probe` 打一次接口，扫描返回体里所有长得像 Solana 地址的值，告诉你它们在哪个路径：
 
 ```bash
-curl -H "X-API-KEY: $BIRDEYE_API_KEY" -H "x-chain: solana" "<接口地址>?limit=10"
+python -m twobots shortlist --probe "https://public-api.birdeye.so/<接口路径>"   --header "X-API-KEY:env:BIRDEYE_API_KEY" --header "x-chain:solana"   --param "limit=10"
 ```
+
+输出形如：
+
+```json
+{
+  "top_level_keys": ["data", "success"],
+  "address_path_candidates": {"data.items[].address": 10},
+  "next": "Put the path with the most addresses in address_path"
+}
+```
+
+**把地址最多的那条路径填进 `address_path` 即可。** `--header NAME:env:VAR` 从 `.env` 读 Key，不用把密钥打在命令行里。
+
+### Birdeye
+
+top traders 类接口，`X-API-KEY` 加 `x-chain: solana`。用上面的 `--probe` 确定 `address_path`。
 
 ### Solscan Pro
 
-普通 REST，header 是 `token`。同样先 curl 一次确认返回结构。
+普通 REST，header 是 `token`。同样用 `--probe`。
 
 ### Flipside
 

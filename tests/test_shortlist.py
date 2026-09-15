@@ -124,6 +124,54 @@ def test_our_own_status_codes_survive_because_they_carry_no_secret():
     assert errors["slow"].startswith("Network timeout")
 
 
+def test_probe_finds_the_address_path_without_reading_any_docs():
+    """Every provider nests addresses differently; recognising them beats a schema."""
+    from adapters.shortlist import probe
+    birdeye_shaped = {"success": True, "data": {"items": [
+        {"address": A, "pnl": 10, "network": "solana"},
+        {"address": B, "pnl": 5, "network": "solana"}]}}
+    http = StubHTTP({"https://p/": birdeye_shaped})
+    paths, keys = probe("https://p/", {}, http)
+    assert paths == {"data.items[].address": 2}
+    assert keys == ["data", "success"]
+
+
+def test_probe_ranks_the_richest_path_first():
+    """A response can carry several address-shaped fields; the list is the one wanted."""
+    from adapters.shortlist import probe
+    payload = {"owner": A, "data": [{"wallet": B}, {"wallet": C}, {"wallet": A}]}
+    paths, _ = probe("https://p/", {}, StubHTTP({"https://p/": payload}))
+    assert list(paths)[0] == "data[].wallet"
+    assert paths["data[].wallet"] == 3 and paths["owner"] == 1
+
+
+def test_probe_without_the_key_says_so_instead_of_calling(monkeypatch):
+    from adapters.shortlist import probe
+    monkeypatch.delenv("PROBE_KEY", raising=False)
+    http = StubHTTP({})
+    with pytest.raises(PermissionError, match="PROBE_KEY"):
+        probe("https://p/", {"X-API-KEY": "env:PROBE_KEY"}, http)
+    assert http.seen == [], "nothing is requested without the key"
+
+
+def test_an_empty_source_list_explains_itself(tmp_path, monkeypatch):
+    """A key in .env does nothing alone, and silence made that impossible to see."""
+    from twobots.cli import refresh_shortlist
+    from twobots.storage import Store
+    monkeypatch.setenv("BIRDEYE_API_KEY", "set-but-unused")
+    cfg = load_config(ROOT / "config.example.yaml")
+    cfg["data_dir"] = str(tmp_path)
+    cfg["shortlist"]["sources"] = []
+    store = Store(tmp_path)
+    try:
+        result = refresh_shortlist(cfg, store, None)
+        assert result["addresses"] == 0
+        assert "No sources" in result["hint"]
+        assert "BIRDEYE_API_KEY" in result["hint"]
+    finally:
+        store.close()
+
+
 def test_invalid_addresses_are_counted_and_dropped():
     http = StubHTTP({"https://mixed/": {"data": [{"address": A}, {"address": "not-an-address"},
                                                  {"address": ""}]}})

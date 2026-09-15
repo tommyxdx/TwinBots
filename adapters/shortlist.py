@@ -105,6 +105,38 @@ def safe_detail(exc):
     return type(exc).__name__
 
 
+def suggest_paths(payload, prefix="", found=None, depth=0):
+    """Dotted paths in a response whose values look like Solana addresses.
+
+    Every provider puts them somewhere different, and reading their docs to find
+    out is the slowest part of adding a source. Recognising the addresses is both
+    faster and harder to get wrong than reading a schema.
+    """
+    found = {} if found is None else found
+    if depth > 8:
+        return found
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            suggest_paths(value, f"{prefix}.{key}" if prefix else key, found, depth + 1)
+    elif isinstance(payload, list):
+        for item in payload[:50]:
+            suggest_paths(item, prefix + "[]", found, depth + 1)
+    elif valid_address(payload):
+        found[prefix] = found.get(prefix, 0) + 1
+    return found
+
+
+def probe(url, headers, http, params=None):
+    """-> (suggested address paths, top-level keys). For wiring up a new source."""
+    resolved, missing = headers_for({"headers": headers})
+    if missing:
+        raise PermissionError("missing " + ", ".join(missing))
+    payload = json.loads(http.request(url, params, resolved, max_bytes=16 * 1024 * 1024))
+    paths = suggest_paths(payload)
+    return (dict(sorted(paths.items(), key=lambda kv: -kv[1])),
+            sorted(payload) if isinstance(payload, dict) else ["<list>"])
+
+
 def collect(sources, http, now=None):
     """-> (addresses -> the sources that named it, per-source report).
 
