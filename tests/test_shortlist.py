@@ -96,13 +96,32 @@ def test_one_provider_failing_does_not_lose_the_others(monkeypatch):
     assert "K2" in by_name["keyless"]["skipped"]
 
 
-def test_provider_errors_never_echo_the_request(monkeypatch):
+def test_provider_errors_never_echo_the_request():
     """A provider message can contain the query string, and that carries the key."""
     http = StubHTTP({"https://leaky/": RuntimeError("failed for ?api_key=SECRET123")})
     _, report = collect([{"name": "leaky", "kind": "http", "url": "https://leaky/",
                           "address_path": "a[].b"}], http, now=100)
     assert "SECRET123" not in json.dumps(report)
     assert report[0]["error"] == "RuntimeError"
+
+
+def test_our_own_status_codes_survive_because_they_carry_no_secret():
+    """401 means the key is wrong, 403 means blocked, 404 means the path is.
+
+    Telling those apart is the whole of diagnosing a source, and the client
+    builds these messages itself from the code and hostname only.
+    """
+    http = StubHTTP({
+        "https://a/": RuntimeError("HTTP 401 from api.dune.com; inspect endpoint/access locally"),
+        "https://b/": RuntimeError("HTTP 403 from api.dune.com; inspect endpoint/access locally"),
+        "https://c/": RuntimeError("Network timeout/error from api.dune.com"),
+    })
+    _, report = collect([{"name": n, "kind": "http", "url": u, "address_path": "a[].b"}
+                         for n, u in (("key", "https://a/"), ("blocked", "https://b/"),
+                                      ("slow", "https://c/"))], http, now=100)
+    errors = {r["source"]: r["error"] for r in report}
+    assert "401" in errors["key"] and "403" in errors["blocked"]
+    assert errors["slow"].startswith("Network timeout")
 
 
 def test_invalid_addresses_are_counted_and_dropped():

@@ -17,6 +17,7 @@ import csv
 import io
 import json
 import os
+import re
 import time
 
 from twobots.wallets import valid_address
@@ -92,6 +93,18 @@ def from_http(source, http):
     return extract(json.loads(raw), source["address_path"])
 
 
+def safe_detail(exc):
+    """A status code separates a bad key from a wrong path from a real block.
+
+    Only messages this project builds itself are passed through; a provider's own
+    text can echo the query string, and that carries the key.
+    """
+    text = str(exc)
+    if re.fullmatch(r"HTTP \d{3} from [\w.-]+;.*", text) or text.startswith("Network timeout"):
+        return text
+    return type(exc).__name__
+
+
 def collect(sources, http, now=None):
     """-> (addresses -> the sources that named it, per-source report).
 
@@ -107,8 +120,7 @@ def collect(sources, http, now=None):
             report.append({"source": name, "skipped": str(exc)})
             continue
         except Exception as exc:
-            # Provider messages can echo a query string, so only the type is kept.
-            report.append({"source": name, "error": type(exc).__name__})
+            report.append({"source": name, "error": safe_detail(exc)})
             continue
         kept, rejected = [], 0
         for value in found[:MAX_PER_SOURCE]:

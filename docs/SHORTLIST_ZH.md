@@ -66,9 +66,9 @@ curl -H "X-API-KEY: $BIRDEYE_API_KEY" -H "x-chain: solana" "<接口地址>?limit
 
 ### Flipside
 
-它的查询 API 是**异步的**（提交 → 轮询 → 取结果），一次请求拿不到结果，所以不适配 `kind: http`。
+两个问题：它的查询 API 是**异步的**（提交 → 轮询 → 取结果），一次请求拿不到结果；而且 2026-09 实测时它文档里那个 API 主机名**根本无法解析 DNS**。
 
-简单做法：在 Flipside 网页跑完查询、导出 CSV，用 `kind: file` 读：
+所以只有一条路：在 Flipside 网页跑完查询、导出 CSV，用 `kind: file` 读：
 
 ```yaml
     - name: flipside
@@ -102,6 +102,19 @@ curl -H "X-API-KEY: $BIRDEYE_API_KEY" -H "x-chain: solana" "<接口地址>?limit
 - 请求受共享日预算和主机限速约束
 - **provider 报错只记录异常类型，不记录消息**——报错消息可能回显带 Key 的查询串
 - Key 只从环境变量读，`.env` 已在 `.gitignore` 里
+
+## 可达性实测（2026-09，德国 Vodafone 家宽）
+
+| 平台 | 结果 |
+|---|---|
+| Dune API | HTTP 401「需要 Key」— 通 |
+| Birdeye API | HTTP 401「需要 Key」— 通 |
+| Solscan Pro API | HTTP 401「需要 Key」— 通 |
+| Flipside API | DNS 解析失败，主机名不存在 |
+
+**Dune 没有封锁德国**：`dune.com`、`docs.dune.com`、`api.dune.com` 从这条线路全部正常。如果你的浏览器打开 Dune 显示 blocked，那是浏览器那一侧的问题（VPN/加速器的出口 IP 被 Cloudflare 标记、拦截类插件、或者缓存的 Cloudflare challenge），不是地区限制。关掉 VPN、用无痕窗口、停用插件再试。
+
+排查时看 `twobots shortlist` 的报错：**401 是 Key 不对，403 才是真被拦，404 是路径写错**。这三个码不含密钥，会原样保留在报告里。
 
 ## 我实测到什么程度
 
