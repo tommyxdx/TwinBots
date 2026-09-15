@@ -325,6 +325,50 @@ def test_activity_feed_write_is_atomic(tmp_path):
     assert not list(tmp_path.glob("*.part"))
 
 
+def test_price_loader_never_asks_for_an_unpublished_archive(tmp_path, monkeypatch):
+    """Binance publishes a month's file after the month ends and a day's after the
+    day ends. Requesting either at the live edge 404s, which used to fail every
+    ledger build outright."""
+    import time
+    from datetime import datetime, timezone
+    from adapters.prices import SolPrice
+    now = time.time()
+    today = datetime.fromtimestamp(now, timezone.utc).date()
+    prices, asked = SolPrice(tmp_path), []
+
+    def archive(kind, key):
+        asked.append((kind, key))
+        return {int(now - 5 * DAY): Decimal("100")}
+
+    monkeypatch.setattr(prices, "_archive", archive)
+    monkeypatch.setattr(prices, "_today", lambda end: {int(now - 30): Decimal("101")})
+    prices.load(now - 70 * DAY, now)
+
+    months = [k for kind, k in asked if kind == "monthly"]
+    days = [k for kind, k in asked if kind == "daily"]
+    assert today.strftime("%Y-%m") not in months, "the running month has no monthly file"
+    assert today.isoformat() not in days, "today has no daily file either"
+    assert days, "the running month still has to be covered day by day"
+    assert all(d < today.isoformat() for d in days)
+    # Today came from the REST tier, so a transaction a minute ago is priceable.
+    assert prices.at(int(now - 10)) == Decimal("101")
+
+
+def test_a_missing_archive_is_a_hole_not_a_crash(tmp_path, monkeypatch):
+    from adapters.prices import SolPrice
+    import time
+    now = time.time()
+    prices = SolPrice(tmp_path)
+    monkeypatch.setattr(prices, "_archive", lambda kind, key: None)
+    monkeypatch.setattr(prices, "_today", lambda end: {int(now - 30): Decimal("101")})
+    prices.load(now - 70 * DAY, now)
+    assert prices.missing, "the absent spans are reported"
+    assert prices.at(int(now - 10)) == Decimal("101")
+    # But a transaction inside the hole is refused rather than priced off a stale bar.
+    with pytest.raises(ValueError, match="gap|at or before"):
+        prices.at(int(now - 60 * DAY))
+
+
 class FakeHelius:
     def __init__(self, entries):
         self.entries, self.calls = entries, 1

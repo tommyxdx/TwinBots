@@ -62,8 +62,12 @@ def refresh_ledgers(cfg,store):
             ledger,report = build(address,helius,prices,min_history_days=w["min_history_days"],
                                   max_pages=w["ledger_max_pages"])
         except Exception as exc:
-            state[address] = {"at":now,"usable":False,"error":f"{type(exc).__name__}"}
+            # Keep the message, not just the class: "HTTPError" alone cannot tell
+            # a missing price archive from a rejected key.
+            state[address] = {"at":now,"usable":False,
+                              "error":f"{type(exc).__name__}: {exc}"[:200]}
             store.set("wallet:build",state)
+            logging.warning("Ledger build failed for %s: %s",address[:8],exc)
             continue
         if ledger is None:
             # A wallet that stopped qualifying must not keep ranking on stale data.

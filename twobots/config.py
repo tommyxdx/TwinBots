@@ -75,7 +75,7 @@ def load_config(path="config.yaml"):
                        "url_template": "", "api_key_env": "WALLET_ACTIVITY_API_KEY",
                        "header": "Authorization", "header_prefix": "Bearer ",
                        "max_leaders": 3, "min_score": 10.0, "allowed_flags": [],
-                       "activity_poll_s": 30, "activity_lookback_s": 900,
+                       "activity_poll_s": 30, "activity_lookback_s": 900, "status_every_s": 300,
                        "ranking_max_age_s": 21600, "max_feed_age_s": 300, "max_signal_age_s": 120,
                        "min_leader_notional_usd": 50.0, "seen_memory": 5000, "cooldown_s": 3600,
                        "mirror_exits": True, "max_activity_mb": 4,
@@ -90,7 +90,7 @@ def load_config(path="config.yaml"):
     for key in ("max_leaders", "ranking_max_age_s", "max_feed_age_s", "max_signal_age_s",
                 "seen_memory", "cooldown_s", "max_activity_mb", "max_positions",
                 "max_hold_hours", "poll_s", "mark_every_s", "activity_poll_s",
-                "activity_lookback_s"):
+                "activity_lookback_s", "status_every_s"):
         if type(f[key]) is not int or f[key] <= 0:
             raise ValueError(f"follow.{key} must be a positive integer")
     if not isinstance(f["allowed_flags"], list) or not set(f["allowed_flags"]) <= set(WALLET_FLAGS):

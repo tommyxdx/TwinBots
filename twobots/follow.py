@@ -86,7 +86,7 @@ class CopyTrader(DexPaper):
     def __init__(self, cfg, store, gateway, feed):
         f = cfg["follow"]
         super().__init__(cfg, store, gateway, {**cfg["dex"], **{k: f[k] for k in POLICY}})
-        self.f, self.feed = f, feed
+        self.f, self.feed, self.next_status = f, feed, 0.0
 
     def leaders(self, now):
         report = self.store.get("wallet:latest")
@@ -156,6 +156,20 @@ class CopyTrader(DexPaper):
                 self.store.set(self.ledger.key, state)
         return result
 
+    def idle_reason(self, now):
+        """Why there is nothing to copy, in the order the gates actually apply."""
+        report = self.store.get("wallet:latest")
+        if not report:
+            return "scanner has not produced a ranking yet"
+        if now - report["generated_at"] > self.f["ranking_max_age_s"]:
+            return "ranking is stale"
+        ranked = [r for r in report["ranking"] if r["score"] is not None]
+        if not ranked:
+            return f"no wallet is ranked yet ({len(report['unavailable'])} candidates unavailable)"
+        if not [r for r in ranked if r["score"] >= self.f["min_score"]]:
+            return f"best score {max(r['score'] for r in ranked):.1f} is below min_score {self.f['min_score']}"
+        return "every ranked wallet carries a flag outside allowed_flags"
+
     async def step(self):
         now = time.time()
         self.store.set("heartbeat:copy", now)
@@ -164,7 +178,19 @@ class CopyTrader(DexPaper):
             self.next_mark = now + self.c["mark_every_s"]
         leaders = self.leaders(now)
         self.store.set("copy:leaders", {"at": now, "addresses": leaders})
-        if not leaders or self.ledger.state()["halted"]:
+        state = self.ledger.state()
+        if now >= self.next_status:
+            # Silence is indistinguishable from a hang, so say what is happening
+            # even when the answer is that nothing can be.
+            if leaders:
+                LOG.info("COPY paper equity %.4f, leaders=%d, positions=%d, halted=%s",
+                         state["cash"] + sum(p.get("last_value", 0)
+                                             for p in state["positions"].values()),
+                         len(leaders), len(state["positions"]), state["halted"])
+            else:
+                LOG.info("COPY idle: %s", self.idle_reason(now))
+            self.next_status = now + self.f["status_every_s"]
+        if not leaders or state["halted"]:
             return
         bought = False
         for signal in self.signals(leaders, now):

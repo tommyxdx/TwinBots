@@ -283,6 +283,37 @@ def test_unsellable_token_does_not_drop_remaining_signals(env):
     assert store.rows("SELECT 1 FROM events WHERE kind='copy_exit_unavailable'")
 
 
+def test_idle_reason_names_the_gate_that_actually_stopped_it(env):
+    """Silence is indistinguishable from a hang, so each gate must say so."""
+    cfg, store, ledgers, activity = env
+    bot = trader(cfg, store)
+    now = time.time()
+    assert "not produced a ranking" in bot.idle_reason(now)
+
+    rank(cfg, store, ledgers, [ledger(701, BAGS, BAG_MARKS)])
+    assert "no wallet is ranked yet" in bot.idle_reason(now)
+
+    rank(cfg, store, ledgers, [ledger(700, GOOD)])
+    cfg["follow"]["min_score"] = 999
+    assert "below min_score" in bot.idle_reason(now)
+
+    cfg["follow"]["min_score"] = 10
+    report = store.get("wallet:latest")
+    report["generated_at"] = now - cfg["follow"]["ranking_max_age_s"] - 1
+    store.set("wallet:latest", report)
+    assert bot.idle_reason(now) == "ranking is stale"
+
+
+def test_flagged_only_ranking_reports_the_flag_gate(env):
+    cfg, store, ledgers, activity = env
+    # A one-token wallet ranks, but carries a flag that allowed_flags does not admit.
+    rank(cfg, store, ledgers, [ledger(702, [(100, 10000)] + [(100 + i % 9 + 1, -10)
+                                                             for i in range(29)])])
+    bot = trader(cfg, store)
+    assert bot.leaders(time.time()) == []
+    assert "allowed_flags" in bot.idle_reason(time.time())
+
+
 def test_copy_account_is_separate_from_dex(env):
     cfg, store, ledgers, activity = env
     rank(cfg, store, ledgers, [ledger(700, GOOD)])
