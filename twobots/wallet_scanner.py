@@ -22,6 +22,46 @@ class WalletScanner:
     def key(self, address):
         return f"wallet:{self.namespace}:{address}"
 
+    def pools(self):
+        """Where to sample traders from.
+
+        Brand-new pools are full of snipers and bundlers, which is why sampling
+        them yields addresses that buy thousands of times and never sell.
+        Trending and top pools carry people actually trading a live market.
+        """
+        path = {"new": "/new_pools", "trending": "/trending_pools", "top": "/pools"}[
+            self.c["discovery_pool_source"]]
+        url = (self.cfg["scanner"]["gecko_base"].rstrip("/") + "/networks/"
+               + quote(self.network, safe="") + path)
+        data = self.http.json(url, {"page": 1})
+        return [p["attributes"]["address"] for p in data.get("data", [])
+                if (p.get("attributes") or {}).get("address")]
+
+    def traders(self, pool):
+        """Biggest sellers in a pool's recent trades, largest first.
+
+        A seller necessarily held inventory and is realising it, which is the
+        only behaviour the ranking can score; a buyer may never close at all.
+        Size filters out the dust that automated accounts generate.
+        """
+        url = (self.cfg["scanner"]["gecko_base"].rstrip("/") + "/networks/"
+               + quote(self.network, safe="") + "/pools/" + quote(pool, safe="") + "/trades")
+        data = self.http.json(url, headers={"Accept": "application/json;version=20230203"})
+        rows = []
+        for trade in data.get("data", []):
+            a = trade.get("attributes") or {}
+            if self.c["discovery_sells_only"] and a.get("kind") != "sell":
+                continue
+            try:
+                size = float(a.get("volume_in_usd") or 0)
+            except (TypeError, ValueError):
+                continue
+            if size < self.c["discovery_min_trade_usd"] or not valid_address(a.get("tx_from_address")):
+                continue
+            rows.append((size, a["tx_from_address"]))
+        rows.sort(reverse=True)
+        return list(dict.fromkeys(address for _, address in rows))
+
     def discover(self, now):
         key = f"wallet:discovery:{self.network}"
         state = self.store.get(key, {"at": 0, "addresses": {}})
@@ -31,19 +71,9 @@ class WalletScanner:
         # Record attempts as well as successes, preventing expensive error loops.
         self.store.set(key, {"at": now, "addresses": addresses})
         try:
-            pools = self.fetcher.discover()[:self.c["discovery_max_pools"]]
-            for pool in pools:
-                url = (self.cfg["scanner"]["gecko_base"].rstrip("/") + "/networks/"
-                       + quote(self.network, safe="") + "/pools/" + quote(pool["pool"], safe="") + "/trades")
-                data = self.http.json(url, headers={"Accept": "application/json;version=20230203"})
-                found = set()
-                for trade in data.get("data", []):
-                    address = trade.get("attributes", {}).get("tx_from_address")
-                    if valid_address(address):
-                        addresses[address] = now
-                        found.add(address)
-                        if len(found) >= self.c["discovery_addresses_per_pool"]:
-                            break
+            for pool in self.pools()[:self.c["discovery_max_pools"]]:
+                for address in self.traders(pool)[:self.c["discovery_addresses_per_pool"]]:
+                    addresses[address] = now
         except Exception as exc:
             self.store.event("wallet_discovery_error", {"type": type(exc).__name__})
         addresses = dict(sorted(addresses.items(), key=lambda x: (-x[1], x[0]))[:self.c["max_candidates"]])

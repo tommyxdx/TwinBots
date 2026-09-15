@@ -42,7 +42,9 @@ def load_config(path="config.yaml"):
                 "url_template": "", "api_key_env": "WALLET_DATA_API_KEY",
                 "header": "Authorization", "header_prefix": "Bearer ",
                 "discover_enabled": True, "discovery_every_s": 21600,
-                "discovery_max_pools": 2, "discovery_addresses_per_pool": 10,
+                "discovery_pool_source": "trending", "discovery_sells_only": True,
+                "discovery_min_trade_usd": 100.0,
+                "discovery_max_pools": 6, "discovery_addresses_per_pool": 10,
                 "max_candidates": 50, "max_wallets_per_run": 2, "refresh_s": 21600,
                 "max_age_s": 21600, "max_ledger_mb": 10, "min_history_days": 30,
                 "min_closed_cycles": 10, "min_closed_tokens": 3,
@@ -50,8 +52,12 @@ def load_config(path="config.yaml"):
     w = cfg["wallets"] = {**defaults, **cfg.get("wallets", {})}
     # chain builds the ledgers itself from on-chain history; local reads files you
     # supply; adapter fetches them from a service you run.
-    if w["source"] not in ("chain", "local", "adapter") or type(w["discover_enabled"]) is not bool:
+    if (w["source"] not in ("chain", "local", "adapter") or type(w["discover_enabled"]) is not bool
+            or type(w["discovery_sells_only"]) is not bool
+            or w["discovery_pool_source"] not in ("trending", "top", "new")):
         raise ValueError("Invalid wallet source/discovery configuration")
+    if w["discovery_min_trade_usd"] < 0:
+        raise ValueError("wallets.discovery_min_trade_usd cannot be negative")
     from .wallets import BLOCKING_FLAGS, WALLET_FLAGS, valid_address
     if not isinstance(w["addresses"], list) or any(not valid_address(a) for a in w["addresses"]):
         raise ValueError("wallets.addresses must be a list of Solana public addresses")

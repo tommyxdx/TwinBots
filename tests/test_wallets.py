@@ -375,18 +375,39 @@ class WalletWorkflow(unittest.TestCase):
             self.assertEqual(len(scanner.run_once()["ranking"]), 2)
         self.assertEqual(http.request.call_count, 2)
 
-    def test_candidate_discovery_cached_and_not_treated_as_profit_history(self):
-        self.cfg["wallets"].update(discover_enabled=True, addresses=[])
-        fetcher, http = Mock(), Mock()
-        fetcher.discover.return_value = [{"pool": address(100)}]
-        http.json.return_value = {"data": [{"attributes": {"tx_from_address": address(500)}},
-                                           {"attributes": {"tx_from_address": "bad"}}]}
-        scanner = WalletScanner(self.cfg, self.store, http, fetcher)
+    def test_discovery_samples_large_sellers_and_caches_them(self):
+        """Buyers may never close; only a seller shows behaviour the ranking can score.
+
+        Sampling signers indiscriminately on new pools returned addresses that
+        buy thousands of times and forward everything out, which no amount of
+        reconstruction can turn into a record.
+        """
+        self.cfg["wallets"].update(discover_enabled=True, addresses=[], discovery_max_pools=1,
+                                   discovery_addresses_per_pool=3, discovery_min_trade_usd=100,
+                                   discovery_sells_only=True)
+        http = Mock()
+        http.json.return_value = {"data": [
+            {"attributes": {"kind": "sell", "volume_in_usd": "900", "tx_from_address": address(501)}},
+            {"attributes": {"kind": "sell", "volume_in_usd": "5000", "tx_from_address": address(500)}},
+            {"attributes": {"kind": "sell", "volume_in_usd": "3", "tx_from_address": address(502)}},
+            {"attributes": {"kind": "buy", "volume_in_usd": "9000", "tx_from_address": address(503)}},
+            {"attributes": {"kind": "sell", "volume_in_usd": "400", "tx_from_address": "bad"}},
+        ]}
+        scanner = WalletScanner(self.cfg, self.store, http, NoNetwork())
+        self.assertEqual(scanner.traders(address(100)), [address(500), address(501)],
+                         "largest seller first, dust and buyers excluded")
+        http.json.reset_mock()
+        http.json.side_effect = [
+            {"data": [{"attributes": {"address": address(100)}}]},
+            {"data": [
+                {"attributes": {"kind": "sell", "volume_in_usd": "5000", "tx_from_address": address(500)}},
+                {"attributes": {"kind": "buy", "volume_in_usd": "9000", "tx_from_address": address(503)}},
+            ]},
+        ]
         with patch("time.time", return_value=NOW):
             result = scanner.run_once()
             scanner.run_once()
-        self.assertEqual(fetcher.discover.call_count, 1)
-        self.assertEqual(http.json.call_count, 1)
+        self.assertEqual(http.json.call_count, 2, "the second pass reuses the cached round")
         self.assertEqual(result["candidate_count"], 1)
         self.assertFalse(result["ranking"])
 

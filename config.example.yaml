@@ -79,12 +79,17 @@ wallets:
   api_key_env: WALLET_DATA_API_KEY
   header: Authorization
   header_prefix: "Bearer "
-  # Discovery samples signers on new pools, which are overwhelmingly snipers
-  # and bundlers rather than traders. Treat it as a random control group and
-  # put the addresses you actually want to study in `addresses` above.
+  # Discovery samples the largest sellers on live pools. Sellers held inventory
+  # and are realising it, which is the only behaviour the ranking can score, and
+  # trending pools carry traders where new pools carry snipers and bundlers.
+  # Even so this is a broad sample, not a shortlist: put the addresses you
+  # actually want to study in `addresses` above.
   discover_enabled: true
+  discovery_pool_source: trending   # trending | top | new
+  discovery_sells_only: true
+  discovery_min_trade_usd: 100
   discovery_every_s: 21600
-  discovery_max_pools: 2
+  discovery_max_pools: 6
   discovery_addresses_per_pool: 10
   max_candidates: 50
   max_wallets_per_run: 2
