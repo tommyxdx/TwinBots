@@ -30,10 +30,41 @@ def output(data):
 
 
 def candidates(cfg,store):
-    """Addresses worth a ledger: the configured list plus whatever discovery found."""
+    """Addresses worth a ledger, best-justified first.
+
+    Your own list leads, then the providers' shortlist, then on-chain discovery,
+    because reconstruction is the scarce resource and the order decides what gets
+    spent on first.
+    """
+    short = store.get("wallet:shortlist",{}).get("addresses",[])
     found = store.get(f"wallet:discovery:{cfg['scanner']['network']}",{}).get("addresses",{})
-    ordered = sorted(found,key=lambda a:(-found[a],a))
-    return list(dict.fromkeys(cfg["wallets"]["addresses"]+ordered))[:cfg["wallets"]["max_candidates"]]
+    discovered = sorted(found,key=lambda a:(-found[a],a))
+    ordered = cfg["wallets"]["addresses"]+short+discovered
+    return list(dict.fromkeys(ordered))[:cfg["wallets"]["max_candidates"]]
+
+
+def refresh_shortlist(cfg,store,http):
+    """Pull candidate addresses from the configured providers and merge them."""
+    from adapters.shortlist import collect,rank_by_agreement
+    merged,report = collect(cfg["shortlist"]["sources"],http)
+    addresses = rank_by_agreement(merged,cfg["shortlist"]["max_addresses"])
+    store.set("wallet:shortlist",{"at":time.time(),"addresses":addresses,
+                                  "sources":{a:merged[a]["sources"] for a in addresses},
+                                  "report":report,
+                                  "note":"A coarse screen from third parties, never a ranking"})
+    return {"addresses":len(addresses),"sources":report}
+
+
+async def shortlist_loop(cfg,store,http):
+    while True:
+        try:
+            result = await asyncio.to_thread(refresh_shortlist,cfg,store,http)
+            logging.info("Shortlist: %d candidate(s) from %d source(s)",
+                         result["addresses"],len(result["sources"]))
+        except Exception as exc:
+            logging.warning("Shortlist refresh failed: %s",exc)
+            store.event("shortlist_error",{"type":type(exc).__name__})
+        await asyncio.sleep(cfg["shortlist"]["refresh_s"])
 
 
 def refresh_ledgers(cfg,store):
@@ -54,7 +85,8 @@ def refresh_ledgers(cfg,store):
         # A build that errored may have failed on something transient, so it is
         # retried on a shorter clock than a ledger that actually reconstructed.
         last = state.get(address,{})
-        wait = w["ledger_build_refresh_s"] if "usable" in last and "error" not in last             else w["ledger_retry_s"]
+        settled = "usable" in last and "error" not in last
+        wait = w["ledger_build_refresh_s"] if settled else w["ledger_retry_s"]
         return now-last.get("at",0) >= wait
     due = [a for a in candidates(cfg,store) if stale(a)]
     if not due:
@@ -153,6 +185,7 @@ def parser():
     r = commands.add_parser("run",help="Scanner + enabled paper venues + hourly maintenance")
     r.add_argument("--close-positions",action="store_true",
                    help="Sell everything before exiting instead of keeping it open")
+    commands.add_parser("shortlist",help="Query the candidate providers once and print the merge")
     commands.add_parser("report")
     demo = commands.add_parser("demo",help="Offline synthetic behavior demo, never performance evidence")
     demo.add_argument("--output",default="demo_output")
@@ -277,6 +310,8 @@ async def services(args,cfg,store,http,fetcher):
             tasks.append(asyncio.create_task(scanner_loop(scanner,cfg)))
             if wallet_mode and cfg["wallets"]["source"]=="chain":
                 tasks.append(asyncio.create_task(ledger_loop(cfg,store)))
+            if wallet_mode and cfg["shortlist"]["enabled"]:
+                tasks.append(asyncio.create_task(shortlist_loop(cfg,store,http)))
         if "copy" in venues and cfg["follow"]["source"]=="local" and cfg["wallets"]["source"]=="chain":
             tasks.append(asyncio.create_task(activity_loop(cfg,store)))
         if args.command=="run":
@@ -314,6 +349,8 @@ def main(argv=None):
     try:
         if args.command=="doctor":
             output(doctor(cfg,store,http,args.online))
+        elif args.command=="shortlist":
+            output(refresh_shortlist(cfg,store,http))
         elif args.command=="report":
             output({"report":export_report(cfg,store)})
         elif args.command=="train":

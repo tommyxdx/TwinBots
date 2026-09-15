@@ -103,6 +103,46 @@ wallets:
   # Inventory transferred out is an outcome nobody can observe. Above this share
   # of deployed cost the record no longer shows what the wallet actually did.
   max_censored_cost_fraction: 0.25
+shortlist:
+  # Candidate addresses from providers that have already indexed the chain. This
+  # is a coarse screen deciding what gets reconstructed, never a ranking: their
+  # PnL uses their own cost conventions and ignores transferred inventory.
+  # A source whose env key is unset is skipped, not fatal — start with one.
+  enabled: false
+  refresh_s: 86400
+  max_addresses: 500
+  sources:
+    # Dune: build a query returning one address column, run it once in the UI,
+    # then point this at its id. This reads the cached result without re-running.
+    # - name: dune
+    #   kind: http
+    #   url: https://api.dune.com/api/v1/query/YOUR_QUERY_ID/results
+    #   headers: {X-DUNE-API-KEY: "env:DUNE_API_KEY"}
+    #   params: {limit: 500}
+    #   address_path: result.rows[].trader
+    #
+    # Birdeye top traders. Confirm the path against a real response first:
+    # curl -H "X-API-KEY: $BIRDEYE_API_KEY" -H "x-chain: solana" "<url>?..."
+    # - name: birdeye
+    #   kind: http
+    #   url: https://public-api.birdeye.so/trader/gainers-losers
+    #   headers: {X-API-KEY: "env:BIRDEYE_API_KEY", x-chain: solana}
+    #   params: {type: 1W, sort_by: PnL, sort_type: desc, limit: 100}
+    #   address_path: data.items[].address
+    #
+    # Solscan Pro, or any other REST endpoint that returns addresses.
+    # - name: solscan
+    #   kind: http
+    #   url: https://pro-api.solscan.io/v2.0/account/top
+    #   headers: {token: "env:SOLSCAN_API_KEY"}
+    #   address_path: data[].address
+    #
+    # Anything exported by hand: Flipside's async query API needs a submit/poll
+    # cycle this does not run, so export its result and read the file instead.
+    # - name: manual
+    #   kind: file
+    #   path: shortlist.csv
+    #   column: address
 follow:
   # Copy trading from the ranked wallets. Paper only; nothing is signed or broadcast.
   enabled: false

@@ -96,8 +96,9 @@ python -m twobots run
 
 三个来源可以混用：
 
-- **自动发现**：`wallets.discover_enabled: true`，每 6 小时从新池成交取发送地址。免费，但**几乎找不到可用的交易者**。
-- **手填**：`wallets.addresses: [地址1, 地址2]`，排在自动发现结果前面优先还原。
+- **手填**：`wallets.addresses: [地址1, 地址2]`，优先级最高，最先还原。
+- **平台粗筛**：接 Dune / Birdeye / Solscan 等，让已经索引过全链的平台把候选从百万缩到几百，见 [SHORTLIST_ZH.md](SHORTLIST_ZH.md)。**这是扩大候选池的正确做法。**
+- **自动发现**：`wallets.discover_enabled: true`，从热门池的大额卖出方取样。免费，优先级最低。
 - **现成账本**：直接把 JSON 放进 `wallet_ledgers/`，文件名等于内容里的 `address`。
 
 **自动发现的实测结果：14 个候选，0 个可排名。** 成功还原的三个长这样：

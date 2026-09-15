@@ -78,6 +78,29 @@ def load_config(path="config.yaml"):
             raise ValueError("Wallet ledger accounting currently supports Solana only")
         if cfg["dex"]["enabled"]:
             raise ValueError("Wallet mode uses follow.enabled for copy trading; keep dex.enabled false")
+    # A YAML key with only comments under it parses as None, not an empty list.
+    given = {k: v for k, v in (cfg.get("shortlist") or {}).items() if v is not None}
+    short = cfg["shortlist"] = {"enabled": False, "refresh_s": 86400, "max_addresses": 500,
+                                "sources": [], **given}
+    if type(short["enabled"]) is not bool or not isinstance(short["sources"], list):
+        raise ValueError("Invalid shortlist configuration")
+    for key in ("refresh_s", "max_addresses"):
+        if type(short[key]) is not int or short[key] <= 0:
+            raise ValueError(f"shortlist.{key} must be a positive integer")
+    if short["max_addresses"] > 5000:
+        raise ValueError("shortlist.max_addresses exceeds what any budget can reconstruct")
+    for source in short["sources"]:
+        if not isinstance(source, dict) or source.get("kind") not in ("http", "file"):
+            raise ValueError("Each shortlist source needs kind: http or file")
+        if source["kind"] == "file":
+            if not source.get("path"):
+                raise ValueError("A file shortlist source needs a path")
+            source["path"] = str((path.parent / source["path"]).resolve())
+        else:
+            if not str(source.get("url", "")).startswith("https://"):
+                raise ValueError("A shortlist source URL must be HTTPS")
+            if not source.get("address_path"):
+                raise ValueError("A shortlist source needs address_path to locate addresses")
     follow_defaults = {"enabled": False, "source": "local", "activity_dir": "wallet_activity",
                        "url_template": "", "api_key_env": "WALLET_ACTIVITY_API_KEY",
                        "header": "Authorization", "header_prefix": "Bearer ",
