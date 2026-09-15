@@ -244,6 +244,18 @@ class CexPaper:
                 break
         self.store.set("heartbeat:cex",time.time())
 
+    async def liquidate(self,reason="shutdown"):
+        """Sell every position into the live book. Needs the depth feed still running."""
+        results = []
+        for symbol,p in list(self.ledger.state()["positions"].items()):
+            try:
+                result = await self.order(symbol,"SELL",p["qty"],reason)
+                results.append({"symbol":symbol,"status":result.get("settled_status",result.get("status"))})
+            except Exception as exc:
+                self.store.event("cex_liquidate_failed",{"symbol":symbol,"type":type(exc).__name__})
+                results.append({"symbol":symbol,"status":"FAILED"})
+        return results
+
     async def run(self):
         # Retry unavailable metadata without pretending the bot is connected.
         while True:

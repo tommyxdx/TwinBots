@@ -370,11 +370,45 @@ def test_a_missing_archive_is_a_hole_not_a_crash(tmp_path, monkeypatch):
 
 
 class FakeHelius:
-    def __init__(self, entries):
+    def __init__(self, entries, size=None):
         self.entries, self.calls = entries, 1
+        self.size = size or {"transactions": len(entries), "complete": True, "oldest": None}
+        self.walked = False
+
+    def history_size(self, address, **kwargs):
+        return self.size
 
     def transactions(self, address, **kwargs):
+        self.walked = True
         return iter(self.entries)
+
+
+def test_a_market_maker_is_priced_out_before_its_history_is_bought():
+    """400 pages spent and thrown away at the cap is the whole budget for nothing."""
+    import time
+    from adapters.ledger import build
+    now = time.time()
+    entries = clean_history(now)
+    # 1000 sampled transactions inside two hours: roughly 12k a day.
+    busy = FakeHelius(entries, {"transactions": 1000, "complete": False,
+                                "oldest": now - 2 * 3600})
+    ledger, report = build(WALLET, busy, FakeSolPrice(), now=now, quote_marks=False)
+    assert ledger is None
+    assert report["blocked_by"] == "history_exceeds_page_budget"
+    assert report["transactions_per_day"] > 10_000
+    assert busy.walked is False, "the full history must never be fetched"
+
+
+def test_an_ordinary_wallet_passes_the_size_probe():
+    import time
+    from adapters.ledger import build
+    now = time.time()
+    entries = clean_history(now)
+    steady = FakeHelius(entries, {"transactions": 1000, "complete": False,
+                                  "oldest": now - 60 * DAY})
+    ledger, report = build(WALLET, steady, FakeSolPrice(), now=now, quote_marks=False)
+    assert report["usable"] is True
+    assert steady.walked is True
 
 
 class FakeSolPrice:

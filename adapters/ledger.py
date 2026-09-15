@@ -22,7 +22,7 @@ import urllib.request
 from twobots.config import load_env
 from twobots.wallets import new_position, remove
 
-from .helius import Helius
+from .helius import PAGE, Helius, TooMuchHistory
 from .prices import SolPrice, quote_pricer
 from .reconstruct import ledger_rows, token_decimals
 
@@ -102,7 +102,22 @@ def build(address, helius, sol_price, now=None, quote_marks=True, max_pages=400,
     says how many transactions were seen and exactly what blocked the rest.
     """
     now = time.time() if now is None else now
-    entries = list(helius.transactions(address, max_pages=max_pages))
+    # Two signature-only pages price the wallet before its full history is bought.
+    # A market maker's ledger costs the entire page budget and is then thrown away
+    # at the cap, so the recent rate is extrapolated over the window first.
+    size = helius.history_size(address)
+    if not size["complete"] and size["oldest"]:
+        per_day = size["transactions"] * DAY / max(now - size["oldest"], 1)
+        projected = per_day * min_history_days
+        if projected > max_pages * PAGE:
+            return None, {"address": address, "rpc_calls": helius.calls, "usable": False,
+                          "blocked_by": "history_exceeds_page_budget",
+                          "transactions_per_day": round(per_day), "projected": round(projected)}
+    try:
+        entries = list(helius.transactions(address, max_pages=max_pages))
+    except TooMuchHistory as exc:
+        return None, {"address": address, "rpc_calls": helius.calls, "usable": False,
+                      "blocked_by": "history_exceeds_page_budget", "detail": str(exc)}
     report = {"address": address, "transactions": len(entries), "rpc_calls": helius.calls}
     if not entries:
         return None, {**report, "usable": False, "blocked_by": "no_transactions"}

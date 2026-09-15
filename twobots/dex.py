@@ -241,6 +241,22 @@ class DexPaper:
             break
         self.store.set("heartbeat:dex",time.time())
 
+    async def liquidate(self,reason="shutdown"):
+        """Sell every position at the current quote. Only on explicit request.
+
+        Forcing exits the strategy did not call for adds a round trip's cost and
+        noise to the record, so this is never part of an ordinary restart.
+        """
+        results = []
+        for token,p in list(self.ledger.state()["positions"].items()):
+            try:
+                result = await self.swap(token,"SELL",int(p["raw_qty"]),reason)
+                results.append({"token":token,"status":result.get("settled_status",result.get("status"))})
+            except Exception as exc:
+                self.store.event(self.venue+"_liquidate_failed",{"token":token,"type":type(exc).__name__})
+                results.append({"token":token,"status":"FAILED"})
+        return results
+
     async def run(self):
         while True:
             try:

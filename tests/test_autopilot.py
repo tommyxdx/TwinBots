@@ -125,6 +125,101 @@ def test_report_shows_the_rejection_mix_without_a_separate_pass(env, monkeypatch
     assert builds["blocked_by"] == {"unreconstructable_cost_basis": 1}
 
 
+class FakeEngine:
+    """Stands in for a venue: a long-running task plus an exit path."""
+
+    def __init__(self, venue="copy", positions=2, hang=False):
+        self.venue, self.positions, self.hang = venue, positions, hang
+        self.liquidated, self.cancelled = None, False
+
+    async def run(self):
+        import asyncio
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.cancelled = True
+            if self.hang:
+                # A socket that will not close in time must not block the exit.
+                await asyncio.sleep(3600)
+            raise
+
+    async def liquidate(self, reason="shutdown"):
+        self.liquidated = reason
+        return [{"token": f"t{i}", "status": "FILLED"} for i in range(self.positions)]
+
+
+def run_supervisor(env, engines, close_positions, stop_after=0.05):
+    import asyncio
+    from twobots.cli import supervise
+    cfg, store, _ = env
+
+    async def main():
+        tasks = [asyncio.create_task(e.run()) for e in engines]
+        tasks.append(asyncio.create_task(asyncio.sleep(stop_after)))
+        await supervise(tasks, engines, cfg, store, close_positions, grace_s=1)
+
+    asyncio.run(main())
+
+
+def test_shutdown_cancels_every_task_and_writes_a_final_report(env):
+    cfg, store, _ = env
+    engines = [FakeEngine("cex"), FakeEngine("copy")]
+    run_supervisor(env, engines, close_positions=False)
+    assert all(e.cancelled for e in engines)
+    assert all(e.liquidated is None for e in engines), "positions are kept by default"
+    assert (Path(cfg["data_dir"]) / "reports" / "latest.html").exists()
+
+
+def test_close_positions_sells_before_the_feeds_are_cancelled(env):
+    """An exit needs a live book or a live quote, so it has to happen first."""
+    cfg, store, _ = env
+    engines = [FakeEngine("cex"), FakeEngine("copy")]
+    run_supervisor(env, engines, close_positions=True)
+    assert all(e.liquidated == "shutdown" for e in engines)
+    assert all(e.cancelled for e in engines)
+
+
+def test_a_task_that_refuses_to_die_cannot_block_the_exit(env):
+    import time
+    engines = [FakeEngine("copy", hang=True)]
+    started = time.time()
+    run_supervisor(env, engines, close_positions=False)
+    # grace_s is 1, so the whole wind-down stays inside a couple of seconds.
+    assert time.time() - started < 5
+
+
+def test_a_real_sigint_winds_down_inside_the_loop(env):
+    """The actual interrupt path: SIGINT must become an event, not unwind the loop.
+
+    Letting KeyboardInterrupt escape leaves the venue feeds' TLS sockets open
+    while the loop closes underneath them, which is what produced the SSL
+    transport traceback on exit.
+    """
+    import asyncio
+    import signal as signal_module
+    from twobots.cli import supervise
+    cfg, store, _ = env
+    engines = [FakeEngine("cex"), FakeEngine("copy")]
+    escaped = []
+
+    async def main():
+        tasks = [asyncio.create_task(e.run()) for e in engines]
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.05, signal_module.raise_signal, signal_module.SIGINT)
+        try:
+            await supervise(tasks, engines, cfg, store, False, grace_s=1)
+        except KeyboardInterrupt:
+            escaped.append(True)
+
+    asyncio.run(main())
+    assert not escaped, "KeyboardInterrupt must be handled inside the loop"
+    assert all(e.cancelled for e in engines)
+    assert (Path(cfg["data_dir"]) / "reports" / "latest.html").exists()
+    # And the handler is put back, so a second interrupt is not swallowed.
+    assert signal_module.getsignal(signal_module.SIGINT) is signal_module.default_int_handler
+
+
 def test_wide_leader_set_without_matching_slots_is_refused(tmp_path):
     """Following 100 wallets through 3 slots drops almost every signal."""
     raw = (ROOT / "config.example.yaml").read_text(encoding="utf-8")

@@ -18,6 +18,10 @@ PAGE = 500
 RETRY_CODES = (429, 500, 502, 503, 504)
 
 
+class TooMuchHistory(RuntimeError):
+    """The wallet has more history than the configured page budget allows."""
+
+
 class RejectRedirects(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise ValueError("Redirects are disabled; the API key must not be forwarded")
@@ -98,4 +102,29 @@ class Helius:
             token, pages = result.get("paginationToken"), pages + 1
             if not token:
                 return
-        raise RuntimeError(f"History exceeded {max_pages} pages; raise the limit or narrow the range")
+        raise TooMuchHistory(f"History exceeded {max_pages} pages of {limit}")
+
+    def history_size(self, address, probe_pages=2, limit=PAGE):
+        """Signatures only, to size a wallet before paying for its full history.
+
+        Walking a market maker's whole ledger and then abandoning it at the page
+        cap spends the entire budget for nothing, so the cheap shape of the
+        history is checked first.
+        """
+        options = {"transactionDetails": "signatures", "commitment": "finalized",
+                   "sortOrder": "desc", "limit": limit,
+                   "filters": {"tokenAccounts": "balanceChanged", "status": "any"}}
+        seen, oldest, token = 0, None, None
+        for _ in range(probe_pages):
+            if token:
+                options["paginationToken"] = token
+            result = self.rpc("getTransactionsForAddress", [address, options])
+            rows = result.get("data") or []
+            seen += len(rows)
+            for row in rows:
+                if row.get("blockTime"):
+                    oldest = min(oldest or row["blockTime"], row["blockTime"])
+            token = result.get("paginationToken")
+            if not token:
+                return {"transactions": seen, "complete": True, "oldest": oldest}
+        return {"transactions": seen, "complete": False, "oldest": oldest}

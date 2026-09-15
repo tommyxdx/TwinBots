@@ -7,6 +7,7 @@ import logging
 import os
 from pathlib import Path
 import shutil
+import signal
 import time
 from .config import load_config
 from .storage import Store
@@ -142,7 +143,11 @@ def parser():
     s.add_argument("--once",action="store_true")
     t = commands.add_parser("trade")
     t.add_argument("--venue",choices=("cex","dex","copy","both"),default="cex")
-    commands.add_parser("run",help="Scanner + enabled paper venues + hourly maintenance")
+    t.add_argument("--close-positions",action="store_true",
+                   help="Sell everything before exiting instead of keeping it open")
+    r = commands.add_parser("run",help="Scanner + enabled paper venues + hourly maintenance")
+    r.add_argument("--close-positions",action="store_true",
+                   help="Sell everything before exiting instead of keeping it open")
     commands.add_parser("report")
     demo = commands.add_parser("demo",help="Offline synthetic behavior demo, never performance evidence")
     demo.add_argument("--output",default="demo_output")
@@ -193,6 +198,49 @@ def doctor(cfg,store,http,online):
     return result
 
 
+async def supervise(tasks,engines,cfg,store,close_positions,grace_s=10):
+    """Run until a task ends or the operator interrupts, then wind down in order.
+
+    The interrupt is turned into an event inside the loop rather than letting
+    KeyboardInterrupt unwind it from outside: the venue feeds hold open TLS
+    sockets, and closing those needs the loop it is about to tear down.
+    """
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+    previous = None
+    try:
+        previous = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT,lambda *_: loop.call_soon_threadsafe(stop.set))
+    except (ValueError,OSError):
+        pass  # Not the main thread; KeyboardInterrupt handling stays with the caller.
+    watcher = asyncio.create_task(stop.wait())
+    try:
+        await asyncio.wait([*tasks,watcher],return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGINT,previous)
+        watcher.cancel()
+        logging.info("Stopping: %s, then final report. Paper state is retained.",
+                     "closing positions" if close_positions else "keeping open positions")
+        # Sell before the feeds stop: an exit needs a live book or a live quote.
+        if close_positions:
+            for engine in engines:
+                try:
+                    done = await asyncio.wait_for(engine.liquidate(),timeout=grace_s)
+                    logging.info("%s liquidated %d position(s) on exit",
+                                 getattr(engine,"venue","cex").upper(),len(done))
+                except Exception as exc:
+                    logging.warning("Liquidation incomplete: %s",exc)
+        for task in tasks:
+            task.cancel()
+        # A bounded window so a hung socket cannot block the shutdown forever.
+        await asyncio.wait([*tasks,watcher],timeout=grace_s)
+        try:
+            await asyncio.to_thread(export_report,cfg,store)
+        except Exception as exc:
+            logging.warning("Final report not written: %s",exc)
+
+
 async def services(args,cfg,store,http,fetcher):
     wallet_mode = cfg["scanner"]["kind"] == "wallets"
     scanner = (WalletScanner if wallet_mode else Scanner)(cfg,store,http,fetcher,Telegram(cfg,store,http))
@@ -228,19 +276,15 @@ async def services(args,cfg,store,http,fetcher):
             tasks.append(asyncio.create_task(activity_loop(cfg,store)))
         if args.command=="run":
             tasks.append(asyncio.create_task(report_loop(cfg,store)))
+        engines = []
         if "cex" in venues:
-            tasks.append(asyncio.create_task(CexPaper(cfg,store,http,fetcher).run()))
+            engines.append(CexPaper(cfg,store,http,fetcher))
         if "dex" in venues:
-            tasks.append(asyncio.create_task(DexPaper(cfg,store,QuoteGateway(cfg,http)).run()))
+            engines.append(DexPaper(cfg,store,QuoteGateway(cfg,http)))
         if "copy" in venues:
-            tasks.append(asyncio.create_task(
-                CopyTrader(cfg,store,QuoteGateway(cfg,http),ActivityFeed(cfg,http)).run()))
-        try:
-            await asyncio.gather(*tasks)
-        finally:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks,return_exceptions=True)
+            engines.append(CopyTrader(cfg,store,QuoteGateway(cfg,http),ActivityFeed(cfg,http)))
+        tasks += [asyncio.create_task(engine.run()) for engine in engines]
+        await supervise(tasks,engines,cfg,store,getattr(args,"close_positions",False))
 
 
 def main(argv=None):
@@ -297,6 +341,7 @@ def main(argv=None):
             asyncio.run(services(args,cfg,store,http,fetcher))
     except KeyboardInterrupt:
         logging.info("Stopped. Paper state retained; restart will reconcile local pending orders.")
+
     finally:
         store.close()
     return 0
