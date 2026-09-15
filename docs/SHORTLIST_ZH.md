@@ -55,7 +55,7 @@ python -m twobots shortlist
 **不用查文档、不用猜字段名。** `--probe` 打一次接口，扫描返回体里所有长得像 Solana 地址的值，告诉你它们在哪个路径：
 
 ```bash
-python -m twobots shortlist --probe "https://public-api.birdeye.so/<接口路径>"   --header "X-API-KEY:env:BIRDEYE_API_KEY" --header "x-chain:solana"   --param "limit=10"
+python -m twobots shortlist --probe "https://public-api.birdeye.so/<接口路径>" --header "X-API-KEY:env:BIRDEYE_API_KEY" --header "x-chain:solana" --param "limit=10"
 ```
 
 输出形如：
