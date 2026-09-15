@@ -378,7 +378,9 @@ class FakeHelius:
     def history_size(self, address, **kwargs):
         return self.size
 
-    def transactions(self, address, **kwargs):
+    def transactions(self, address, max_pages=400, **kwargs):
+        if max_pages == 1:          # the cheap shape sample, not the full backfill
+            return iter(self.entries[-3:])
         self.walked = True
         return iter(self.entries)
 
@@ -397,6 +399,70 @@ def test_a_market_maker_is_priced_out_before_its_history_is_bought():
     assert report["blocked_by"] == "history_exceeds_page_budget"
     assert report["transactions_per_day"] > 10_000
     assert busy.walked is False, "the full history must never be fetched"
+
+
+def test_a_distributor_is_refused_on_one_sample_page():
+    """Observed on live discovery: 3,799 buys, 161 sells, 3,415 forwarded out.
+
+    The tokens leave before they are sold, so whatever happened to them happened
+    at another address. Reconstructing the whole history cannot change that.
+    """
+    import time
+    from adapters.ledger import build
+    now = time.time()
+    forwards = []
+    for i in range(30):
+        ts = int(now - 20 * DAY + i * 3600)
+        forwards.append(usdc_swap(f"fb{i}", ts, BONK, 1000, -500, slot=900 + i))
+        forwards.append(entry(f"fo{i}", ts + 60, fee=0, slot=950 + i,
+                              pre=[balance(2, BONK, WALLET, 1000 * 10 ** 9, 9)],
+                              post=[balance(2, BONK, WALLET, 0, 9)]))
+    client = FakeHelius(clean_history(now) + forwards)
+    original = client.entries
+
+    def transactions(address, max_pages=400, **kwargs):
+        if max_pages == 1:          # the recent page is all buy-and-forward
+            return iter(forwards)
+        client.walked = True
+        return iter(original)
+
+    client.transactions = transactions
+    ledger, report = build(WALLET, client, FakeSolPrice(), now=now, quote_marks=False)
+    assert ledger is None
+    assert report["blocked_by"] == "buys_and_forwards_rather_than_trades"
+    assert report["recent_mix"]["transfer_out"] > 0
+    assert client.walked is False, "the full history is never bought for a distributor"
+
+
+def test_a_trader_who_also_moves_a_position_out_is_not_mistaken_for_one():
+    """Some housekeeping is normal; the filter only catches an address that
+    essentially never sells."""
+    import time
+    from adapters.ledger import build
+    now = time.time()
+    mixed = []
+    for i in range(30):
+        ts = int(now - 20 * DAY + i * 3600)
+        mixed.append(usdc_swap(f"mb{i}", ts, BONK, 1000, -500, slot=900 + i))
+        if i % 5 == 0:
+            mixed.append(entry(f"mo{i}", ts + 60, fee=0, slot=950 + i,
+                               pre=[balance(2, BONK, WALLET, 1000 * 10 ** 9, 9)],
+                               post=[balance(2, BONK, WALLET, 0, 9)]))
+        else:
+            mixed.append(usdc_swap(f"ms{i}", ts + 60, BONK, -1000, 600, slot=950 + i))
+    client = FakeHelius(clean_history(now))
+    original = client.entries
+
+    def transactions(address, max_pages=400, **kwargs):
+        if max_pages == 1:
+            return iter(mixed)
+        client.walked = True
+        return iter(original)
+
+    client.transactions = transactions
+    ledger, report = build(WALLET, client, FakeSolPrice(), now=now, quote_marks=False)
+    assert report["usable"] is True
+    assert client.walked is True
 
 
 def test_an_ordinary_wallet_passes_the_size_probe():

@@ -24,7 +24,7 @@ from twobots.wallets import new_position, remove
 
 from .helius import PAGE, Helius, TooMuchHistory
 from .prices import SolPrice, quote_pricer
-from .reconstruct import ledger_rows, token_decimals
+from .reconstruct import classify, ledger_rows, normalize, quote_usd, token_decimals
 
 DAY = 86400
 USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -94,14 +94,40 @@ def reason_counts(rejected):
     return dict(sorted(counts.items()))
 
 
+def activity_mix(entries, address):
+    """Shape of recent activity, without needing USD prices.
+
+    Only each leg's direction matters here, so every quote asset counts as one
+    unit: enough to tell a trader from an address that buys and forwards.
+    """
+    unit = lambda mint, ts: Decimal(1)
+    counts = {}
+    for entry in entries:
+        row = normalize(entry, address)
+        side, _ = classify(row, quote_usd(row, unit))
+        counts[side] = counts.get(side, 0) + 1
+    return counts
+
+
 def build(address, helius, sol_price, now=None, quote_marks=True, max_pages=400,
-          min_history_days=30):
+          min_history_days=30, max_forwarded=0.8, min_closing_sample=20):
     """-> (ledger or None, report). None means the wallet cannot be ranked honestly.
 
     Being unusable is an ordinary outcome, not an error, so the report always
     says how many transactions were seen and exactly what blocked the rest.
     """
     now = time.time() if now is None else now
+    # One recent page shows the shape of the address. Buying thousands of times
+    # and forwarding almost all of it is a distributor or bundler: the outcome
+    # happens at whatever address received the tokens, never here, so its record
+    # is unusable no matter how much of it is reconstructed.
+    sample = list(helius.transactions(address, max_pages=1, sort_order="desc"))
+    mix = activity_mix(sample, address)
+    exits = mix.get("sell", 0) + mix.get("batch_sell", 0)
+    forwarded = mix.get("transfer_out", 0)
+    if forwarded + exits >= min_closing_sample and forwarded / (forwarded + exits) > max_forwarded:
+        return None, {"address": address, "rpc_calls": helius.calls, "usable": False,
+                      "blocked_by": "buys_and_forwards_rather_than_trades", "recent_mix": mix}
     # Two signature-only pages price the wallet before its full history is bought.
     # A market maker's ledger costs the entire page budget and is then thrown away
     # at the cap, so the recent rate is extrapolated over the window first.

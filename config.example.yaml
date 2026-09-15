@@ -70,6 +70,8 @@ wallets:
   # ledgers_per_cycle only once you have seen what one costs in rpc_calls.
   ledger_build_every_s: 600
   ledger_build_refresh_s: 86400
+  # A build that errored is retried sooner than one that actually reconstructed.
+  ledger_retry_s: 3600
   ledgers_per_cycle: 3
   ledger_max_pages: 400
   addresses: []
@@ -77,6 +79,9 @@ wallets:
   api_key_env: WALLET_DATA_API_KEY
   header: Authorization
   header_prefix: "Bearer "
+  # Discovery samples signers on new pools, which are overwhelmingly snipers
+  # and bundlers rather than traders. Treat it as a random control group and
+  # put the addresses you actually want to study in `addresses` above.
   discover_enabled: true
   discovery_every_s: 21600
   discovery_max_pools: 2

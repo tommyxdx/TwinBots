@@ -50,8 +50,13 @@ def refresh_ledgers(cfg,store):
     folder.mkdir(parents=True,exist_ok=True)
     state = store.get("wallet:build",{})
     now = time.time()
-    due = [a for a in candidates(cfg,store)
-           if now-state.get(a,{}).get("at",0) >= w["ledger_build_refresh_s"]]
+    def stale(address):
+        # A build that errored may have failed on something transient, so it is
+        # retried on a shorter clock than a ledger that actually reconstructed.
+        last = state.get(address,{})
+        wait = w["ledger_build_refresh_s"] if "usable" in last and "error" not in last             else w["ledger_retry_s"]
+        return now-last.get("at",0) >= wait
+    due = [a for a in candidates(cfg,store) if stale(a)]
     if not due:
         return {"built":0,"pending":0}
     due.sort(key=lambda a: state.get(a,{}).get("at",0))
