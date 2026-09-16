@@ -89,10 +89,27 @@ python -m twobots shortlist --probe "https://public-api.birdeye.so/<接口路径
 | `/defi/v2/tokens/top_traders` | 某个代币的顶级交易者 | `data.items[].owner` |
 | `/defi/txs/token` | 某个代币的成交流水 | `data.items[].owner` |
 
-**做粗筛用第一个**——它直接就是按盈亏排的交易者榜，不用先选代币。可直接粘贴：
+**做粗筛用第一个**——它直接就是按盈亏排的交易者榜，不用先选代币。
+
+`type` 合法值是 **`today` / `yesterday` / `1W` / `30d` / `90d`**（填别的会 400 并回显合法列表）。**一个 Key 可以声明多个源**，每个档位一条，实测五个档位各返回 100 个、并集 **247 个独立地址**——单用 `1W` 只有 100。
+
+| 档位 | 与 1W 的重叠 |
+|---|---|
+| today | 31 |
+| yesterday | 43 |
+| 30d | 93 |
+| 90d | 82 |
+
+`today` / `yesterday` 带来的新地址最多，但**优先用长窗口**：按 90 天盈亏排出来的钱包，比按当天排出来的更可能有排名需要的完整平仓周期。
 
 ```yaml
-    - name: birdeye
+    - name: birdeye_90d
+      kind: http
+      url: https://public-api.birdeye.so/trader/gainers-losers
+      headers: {X-API-KEY: "env:BIRDEYE_API_KEY", x-chain: solana}
+      params: {type: 90d, sort_by: PnL, sort_type: desc, limit: 100}
+      address_path: data.items[].address
+    - name: birdeye_1w
       kind: http
       url: https://public-api.birdeye.so/trader/gainers-losers
       headers: {X-API-KEY: "env:BIRDEYE_API_KEY", x-chain: solana}
@@ -100,11 +117,15 @@ python -m twobots shortlist --probe "https://public-api.birdeye.so/<接口路径
       address_path: data.items[].address
 ```
 
-`type` 可选 `1D` / `1W` / `1M`。注意它的 PnL 口径和本程序的排名完全不同，这里只用它来决定"哪些地址值得花 RPC 去查"。
+注意它的 PnL 口径和本程序的排名完全不同，这里只用它来决定"哪些地址值得花 RPC 去查"。
 
-### Solscan Pro
+### Solscan Pro：免费 Key 不够用
 
-普通 REST，header 是 `token`。同样用 `--probe`。
+header 是 `token`（用 `Authorization: Bearer` 会回 "Token is missing"，可以确认格式）。
+
+但 2026-09 实测：**免费档 Key 对 `/v2.0/` 下所有接口都返回 401 "Unauthorized: Please upgrade your api key level"**——`account/detail`、`token/defi/activities`、`token/holders`、`token/trending`、`token/top` 无一例外。Key 本身有效，是套餐等级不够。
+
+要用 Solscan 得先付费升级。在那之前，多接几个 Birdeye 档位是免费的替代方案。
 
 ### Flipside
 

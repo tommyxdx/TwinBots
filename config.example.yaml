@@ -128,21 +128,25 @@ shortlist:
     #   params: {limit: 500}
     #   address_path: result.rows[].trader
     #
-    # Birdeye top traders. Confirm the path against a real response first:
-    # curl -H "X-API-KEY: $BIRDEYE_API_KEY" -H "x-chain: solana" "<url>?..."
-    # - name: birdeye
+    # Birdeye gainers/losers. One key serves several timeframes, and each is a
+    # separate source: type accepts today, yesterday, 1W, 30d and 90d, and the
+    # five together returned 247 unique addresses where 1W alone returned 100.
+    # Prefer the longer windows: a wallet ranked over 90 days is likelier to have
+    # the complete round trips the ranking needs than one ranked over a day.
+    # - name: birdeye_90d
     #   kind: http
     #   url: https://public-api.birdeye.so/trader/gainers-losers
     #   headers: {X-API-KEY: "env:BIRDEYE_API_KEY", x-chain: solana}
-    #   params: {type: 1W, sort_by: PnL, sort_type: desc, limit: 100}
+    #   params: {type: 90d, sort_by: PnL, sort_type: desc, limit: 100}
     #   address_path: data.items[].address
     #
-    # Solscan Pro, or any other REST endpoint that returns addresses.
+    # Solscan Pro needs a paid key level: a free one answers every v2.0 endpoint
+    # with 401 "Please upgrade your api key level".
     # - name: solscan
     #   kind: http
-    #   url: https://pro-api.solscan.io/v2.0/account/top
+    #   url: https://pro-api.solscan.io/v2.0/<endpoint>
     #   headers: {token: "env:SOLSCAN_API_KEY"}
-    #   address_path: data[].address
+    #   address_path: <find it with --probe>
     #
     # Anything exported by hand: Flipside's async query API needs a submit/poll
     # cycle this does not run, so export its result and read the file instead.
