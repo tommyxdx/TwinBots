@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import random
 import time
@@ -12,7 +13,7 @@ import websockets
 from .data import INTERVALS
 from .execution import Book, Ledger, quantize, symbol_rules
 from .features import price_frame, regime, signal
-from .models import LinearProbability
+from .models import LinearProbability, model_context, model_unavailable
 
 LOG = logging.getLogger(__name__)
 
@@ -40,6 +41,9 @@ class CexPaper:
             self.account_fees()
 
     def account_fees(self):
+        trusted = {"https://api.binance.com", *(f"https://api{i}.binance.com" for i in range(1,5))}
+        if self.c["rest_base"].rstrip("/") not in trusted:
+            raise ValueError("Signed fee queries require an official Binance REST origin")
         key,secret = os.getenv("BINANCE_API_KEY"),os.getenv("BINANCE_API_SECRET")
         if not key or not secret:
             raise ValueError("Fee lookup enabled but local Binance credentials are missing")
@@ -47,10 +51,16 @@ class CexPaper:
             p = {"symbol":symbol,"timestamp":int(time.time()*1000),"recvWindow":5000}
             p["signature"] = hmac.new(secret.encode(),urlencode(p).encode(),hashlib.sha256).hexdigest()
             raw = self.http.json(self.c["rest_base"]+"/api/v3/account/commission",p,{"X-MBX-APIKEY":key})
+            if raw.get("symbol") != symbol or "standardCommission" not in raw:
+                raise ValueError("Commission response is missing symbol or standard fees")
             rates = {}
             for side,leg in (("BUY","buyer"),("SELL","seller")):
-                rates[side] = sum(float(raw.get(k,{}).get("taker",0))+float(raw.get(k,{}).get(leg,0))
-                                  for k in ("standardCommission","taxCommission","specialCommission"))
+                components = [float(raw[k][field]) for k in
+                              ("standardCommission", "taxCommission", "specialCommission")
+                              if k in raw for field in ("taker", leg)]
+                if not all(math.isfinite(x) and 0 <= x < 1 for x in components) or sum(components) >= 1:
+                    raise ValueError("Invalid commission rate")
+                rates[side] = sum(components)
             # No BNB balance assumption; model undiscounted fee in quote currency.
             self.fees[symbol] = rates
         self.store.set("cex:fee_rates",{"at":time.time(),"rates":self.fees,"BNB_discount_applied":False})
@@ -141,10 +151,14 @@ class CexPaper:
         path = self.store.root/"models"/"cex_gate.json"
         if not path.exists():
             return False,{"status":"missing_model"}
-        m = LinearProbability.load(path)
+        try:
+            m = LinearProbability.load(path)
+        except (OSError, ValueError):
+            return False,{"status":"invalid_model"}
         metrics = m.data["metrics"]
-        if time.time()-m.data["created_at"]>self.c["model_refresh_days"]*86400:
-            return False,{"status":"stale_model"}
+        unavailable = model_unavailable(m.data, self.c["model_refresh_days"]*86400, model_context(self.cfg, "cex"))
+        if unavailable:
+            return False,{"status":unavailable}
         if metrics["brier"]>=metrics["baseline_brier"] or metrics["average_precision"]<=metrics["test_prevalence"]:
             return False,{"status":"no_holdout_advantage"}
         p = m.predict(row)
@@ -181,6 +195,9 @@ class CexPaper:
             if (book and book.fresh(self.c["depth_stale_ms"]) and (book.top("SELL")<=p.get("stop",0) or p.get("exit_reason"))
                     and time.time()-self.store.get("cex:exit_attempt:"+symbol,0)>30):
                 self.store.set("cex:exit_attempt:"+symbol,time.time())
+                state = self.ledger.state()
+                state["positions"][symbol].setdefault("exit_reason", "stop_or_trailing")
+                self.store.set(self.ledger.key, state)
                 await self.order(symbol,"SELL",p["qty"],p.get("exit_reason","stop_or_trailing"))
                 if self.ledger.pending():
                     return
@@ -210,17 +227,34 @@ class CexPaper:
                 if not book or not book.fresh(self.c["depth_stale_ms"]):
                     continue  # Retry evaluation once a synchronized book exists.
                 price = book.top("BUY")
-                equity = state["cash"]+sum(values.get(k,p["cost"]) for k,p in state["positions"].items())
+                # Orders earlier in this loop may have partially sold inventory.
+                equity = state["cash"]+sum(p.get("last_value",p["cost"]) for p in state["positions"].values())
                 distance = min(self.c["max_stop_fraction"],max(self.c["min_stop_fraction"],
                                self.c["stop_atr"]*float(row["atr"])/price))
                 # Cost allowance means risk sizing includes estimated round-trip fees.
-                budget = min(equity*self.c["max_position_fraction"],equity*self.c["risk_fraction"]/(distance+2*self.c["fee_rate"]))
-                await self.order(symbol,"BUY",budget/price,action,
+                buy_fee = self.fees.get(symbol,{}).get("BUY",self.c["fee_rate"])
+                sell_fee = self.fees.get(symbol,{}).get("SELL",self.c["fee_rate"])
+                cost = buy_fee + sell_fee + 2*self.c["slippage_limit_bps"]/10000
+                budget = min(equity*self.c["max_position_fraction"],equity*self.c["risk_fraction"]/(distance+cost))
+                worst_price = price*(1+self.c["slippage_limit_bps"]/10000)*(1+buy_fee)
+                await self.order(symbol,"BUY",budget/worst_price,action,
                                  {"stop":price*(1-distance),"atr":float(row["atr"]),"high_water":price,"regime":market})
             self.store.set("cex:evaluated:"+symbol,period)
             if self.ledger.pending():
                 break
         self.store.set("heartbeat:cex",time.time())
+
+    async def liquidate(self,reason="shutdown"):
+        """Sell every position into the live book. Needs the depth feed still running."""
+        results = []
+        for symbol,p in list(self.ledger.state()["positions"].items()):
+            try:
+                result = await self.order(symbol,"SELL",p["qty"],reason)
+                results.append({"symbol":symbol,"status":result.get("settled_status",result.get("status"))})
+            except Exception as exc:
+                self.store.event("cex_liquidate_failed",{"symbol":symbol,"type":type(exc).__name__})
+                results.append({"symbol":symbol,"status":"FAILED"})
+        return results
 
     async def run(self):
         # Retry unavailable metadata without pretending the bot is connected.

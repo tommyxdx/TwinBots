@@ -6,7 +6,7 @@ import time
 from urllib.parse import quote
 from .data import number, seconds
 from .features import price_frame
-from .models import LinearProbability
+from .models import LinearProbability, model_context, model_unavailable
 from .net import auth_headers
 from .storage import dumps
 
@@ -55,10 +55,20 @@ def assess(pool, row, security, cfg, now=None):
     bad = number(security.get("creator_bad_rate"))
     add("创建者历史坏币率低于 20%", 5, bad, lambda x: 0 <= x < .2, bad)
     blocked = [k for k in ("can_sell", "mint_revoked", "freeze_revoked") if security.get(k) is False]
+    concentrations = (("top10_ex_lp_fraction", top, .35),
+                      ("largest_funding_cluster_fraction", cluster, .2),
+                      ("creator_bad_rate", bad, .2))
+    blocked.extend(k for k, value, maximum in concentrations
+                   if value is not None and not 0 <= value < maximum)
+    risk_verified = (all(security.get(k) is True for k in ("can_sell", "mint_revoked", "freeze_revoked"))
+                     and all(value is not None and 0 <= value < maximum
+                             for _, value, maximum in concentrations))
     score = sum(c["weight"] for c in checks if c["pass"] is True)
     return {"score": score, "score_denominator": 100, "passed": sum(c["pass"] is True for c in checks),
             "known": sum(c["pass"] is not None for c in checks), "total_checks": len(checks),
             "checks": checks, "blocked": blocked,
+            "risk_verified": risk_verified,
+            "market_eligible": checks[0]["pass"] is True and checks[1]["pass"] is True,
             "security_verified": all(security.get(k) is True for k in ("can_sell", "mint_revoked", "freeze_revoked")),
             "score_meaning": "Unvalidated heuristic priority score; not probability or proven edge"}
 
@@ -83,6 +93,10 @@ class Scanner:
         for k in ("can_sell", "mint_revoked", "freeze_revoked"):
             if k in features and not isinstance(features[k], bool):
                 raise ValueError("Security values must be JSON booleans, not strings")
+        for k in ("top10_ex_lp_fraction", "largest_funding_cluster_fraction", "creator_bad_rate"):
+            if k in features and (isinstance(features[k], bool) or number(features[k]) is None
+                                  or not 0 <= number(features[k]) <= 1):
+                raise ValueError("Security fractions must be finite values in [0,1]")
         return features, {"status": "external_snapshot", "asof": at, "source": p.get("source", "configured_adapter")}
 
     def probabilities(self, row):
@@ -93,11 +107,19 @@ class Scanner:
             result = {"probability": None, "status": "insufficient_mature_labels", "target": target,
                       "meaning": "future closing-price milestone, not executable investment return"}
             if p.exists():
-                model = LinearProbability.load(p)
+                try:
+                    model = LinearProbability.load(p)
+                except (OSError, ValueError):
+                    result["status"] = "invalid_model"
+                    results[name] = result
+                    continue
                 m = model.data["metrics"]
                 result["validation"] = m
-                if time.time() - model.data["created_at"] > 7*86400:
-                    result["status"] = "stale_model"
+                unavailable = model_unavailable(model.data, 7*86400, model_context(self.cfg, "scanner"))
+                if model.data.get("target") != target:
+                    result["status"] = "model_target_changed"
+                elif unavailable:
+                    result["status"] = unavailable
                 elif m["brier"] >= m["baseline_brier"] or m["average_precision"] <= m["test_prevalence"]:
                     result["status"] = "no_holdout_advantage"
                 else:
@@ -120,7 +142,8 @@ class Scanner:
             except Exception as exc:
                 errors.append(str(exc))
             f = price_frame(self.store.candles("dex:"+p["network"], p["pool"], 1000),300)
-            fresh = bool(not f.empty and time.time()-f.iloc[-1]["close_ts"] <= 900)
+            fresh = bool(not f.empty and 0 <= time.time()-f.iloc[-1]["close_ts"] <= 900
+                         and f.iloc[-1]["continuous"])
             row = f.iloc[-1].to_dict() if fresh else {}
             try:
                 sec, provenance = self.security(p)
@@ -140,7 +163,9 @@ class Scanner:
             result = {"at": time.time(), "network": p["network"], "token": p["token"], "pool": p["pool"],
                       "symbol": p.get("token_attributes", {}).get("symbol", "?"),
                       **assess(p, row, sec, self.c), "features": finite_features(row),
-                      "history_fresh": fresh, "security_source": provenance,
+                      "history_fresh": fresh,
+                      "history_asof": float(f.iloc[-1]["close_ts"]) if not f.empty else None,
+                      "security_source": provenance,
                       "probabilities": self.probabilities(row), "errors": errors}
             with self.store.transaction() as db:
                 db.execute("INSERT INTO scans(ts,network,token,pool,score,payload) VALUES(?,?,?,?,?,?)",

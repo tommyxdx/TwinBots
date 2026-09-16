@@ -3,13 +3,13 @@ data_dir: data
 bootstrap_on_start: true
 http:
   timeout_s: 15
-  retries: 2
+  retries: 1
   max_download_mb: 64
-  max_requests_per_day: 3000
+  max_requests_per_day: 1000
   min_interval_s: 0.15
   host_intervals:
-    api.geckoterminal.com: 3
-    api.jup.ag: 1
+    api.geckoterminal.com: 6.5
+    api.jup.ag: 2
 history:
   archive_base: https://data.binance.vision
   months: 12
@@ -27,16 +27,17 @@ history:
   dataset_header: Authorization
   dataset_header_prefix: "Bearer "
   # Prospective sample for scanner training; independent of score/winner status.
-  cohort_max_pools: 40
+  cohort_max_pools: 20
   cohort_sample_fraction: 0.02
   cohort_follow_days: 35
-  cohort_refresh_hours: 6
+  cohort_refresh_hours: 12
 scanner:
+  kind: wallets  # wallets is the default; tokens retains the legacy scanner.
   network: solana
   gecko_base: https://api.geckoterminal.com/api/v2
-  poll_s: 300
+  poll_s: 600
   pages: 1
-  max_candidates: 3
+  max_candidates: 2
   history_limit: 1000
   min_liquidity_usd: 20000
   max_age_hours: 48
@@ -57,6 +58,152 @@ scanner:
     - {name: x2_24h, multiple: 2, horizon_hours: 24}
     - {name: x10_7d, multiple: 10, horizon_hours: 168}
     - {name: x100_30d, multiple: 100, horizon_hours: 720}
+wallets:
+  # chain: `twobots run` rebuilds ledgers itself from on-chain history (needs
+  #        HELIUS_API_KEY in .env; nothing else to launch).
+  # local: <ledger_dir>/<Solana address>.json you supply, schema in docs/WALLET_DATA.md.
+  # adapter: trusted GET endpoint returning that same complete ledger schema.
+  source: chain
+  ledger_dir: wallet_ledgers
+  # How often the builder wakes, and how stale a ledger may get before rebuild.
+  # A ledger records when it was built and the ranking refuses one older than
+  # max_age_s below, so this MUST stay under that or every ledger spends the
+  # difference unusable. Each outcome then gets its own clock: a usable ledger
+  # is kept fresh, an error may have been transient, and a determination such as
+  # "this address forwards rather than trades" will not change today.
+  ledger_build_every_s: 600
+  ledger_build_refresh_s: 14400
+  ledger_retry_s: 3600
+  ledger_reject_retry_s: 86400
+  # A cycle stops at whichever comes first. Most candidates are rejected in one
+  # or two calls, so the call budget is what actually binds; the wallet count is
+  # only a safety net. 20 calls per 10 minutes stays inside a free Helius tier.
+  ledgers_per_cycle: 25
+  ledger_calls_per_cycle: 20
+  # Transactions stream through and are reduced as they arrive, but a wallet
+  # with a vast history is still refused rather than allowed to exhaust memory.
+  ledger_max_pages: 400
+  ledger_max_transactions: 60000
+  addresses: []
+  url_template: ""  # Optional {network} and {address}; NOT a raw PnL API URL.
+  api_key_env: WALLET_DATA_API_KEY
+  header: Authorization
+  header_prefix: "Bearer "
+  # Discovery samples the largest sellers on live pools. Sellers held inventory
+  # and are realising it, which is the only behaviour the ranking can score, and
+  # trending pools carry traders where new pools carry snipers and bundlers.
+  # Even so this is a broad sample, not a shortlist: put the addresses you
+  # actually want to study in `addresses` above.
+  discover_enabled: true
+  discovery_pool_source: trending   # trending | top | new
+  discovery_sells_only: true
+  discovery_min_trade_usd: 100
+  discovery_every_s: 21600
+  discovery_max_pools: 6
+  discovery_addresses_per_pool: 10
+  max_candidates: 50
+  max_wallets_per_run: 2
+  refresh_s: 21600
+  max_age_s: 21600
+  max_ledger_mb: 10
+  # Shorter histories are not refused, only down-weighted by the sample term.
+  min_history_days: 30
+  min_closed_cycles: 10
+  min_closed_tokens: 3
+  # A position sold down to this share of its peak counts as exited. Traders
+  # leave dust and a proportional split of mixed-origin inventory leaves a
+  # rounding residue; requiring exactly zero never closed either.
+  cycle_dust_fraction: 0.001
+  # Inventory transferred out is an outcome nobody can observe. Above this share
+  # of deployed cost the record no longer shows what the wallet actually did.
+  max_censored_cost_fraction: 0.25
+  # Balance deltas see every protocol that moves a token, and none that does not:
+  # a perp, loan or LP position lives inside the protocol. Above this share of
+  # unclassifiable transactions the wallet may be trading where this cannot look.
+  max_unclassified_fraction: 0.5
+shortlist:
+  # Candidate addresses from providers that have already indexed the chain. This
+  # is a coarse screen deciding what gets reconstructed, never a ranking: their
+  # PnL uses their own cost conventions and ignores transferred inventory.
+  # A source whose env key is unset is skipped, not fatal — start with one.
+  enabled: false
+  refresh_s: 86400
+  max_addresses: 500
+  sources:
+    # Dune: build a query returning one address column, run it once in the UI,
+    # then point this at its id. This reads the cached result without re-running.
+    # - name: dune
+    #   kind: http
+    #   url: https://api.dune.com/api/v1/query/YOUR_QUERY_ID/results
+    #   headers: {X-DUNE-API-KEY: "env:DUNE_API_KEY"}
+    #   params: {limit: 500}
+    #   address_path: result.rows[].trader
+    #
+    # Birdeye gainers/losers. One key serves several timeframes, and each is a
+    # separate source: type accepts today, yesterday, 1W, 30d and 90d, and the
+    # five together returned 247 unique addresses where 1W alone returned 100.
+    # Prefer the longer windows: a wallet ranked over 90 days is likelier to have
+    # the complete round trips the ranking needs than one ranked over a day.
+    # - name: birdeye_90d
+    #   kind: http
+    #   url: https://public-api.birdeye.so/trader/gainers-losers
+    #   headers: {X-API-KEY: "env:BIRDEYE_API_KEY", x-chain: solana}
+    #   params: {type: 90d, sort_by: PnL, sort_type: desc, limit: 100}
+    #   address_path: data.items[].address
+    #
+    # Solscan Pro needs a paid key level: a free one answers every v2.0 endpoint
+    # with 401 "Please upgrade your api key level".
+    # - name: solscan
+    #   kind: http
+    #   url: https://pro-api.solscan.io/v2.0/<endpoint>
+    #   headers: {token: "env:SOLSCAN_API_KEY"}
+    #   address_path: <find it with --probe>
+    #
+    # Anything exported by hand: Flipside's async query API needs a submit/poll
+    # cycle this does not run, so export its result and read the file instead.
+    # - name: manual
+    #   kind: file
+    #   path: shortlist.csv
+    #   column: address
+follow:
+  # Copy trading from the ranked wallets. Paper only; nothing is signed or broadcast.
+  enabled: false
+  # local: <activity_dir>/<Solana address>.json, schema in docs/COPY_TRADING.md.
+  # adapter: trusted GET endpoint returning that same recent-fill schema.
+  source: local
+  activity_dir: wallet_activity
+  url_template: ""  # Optional {network} and {address}.
+  api_key_env: WALLET_ACTIVITY_API_KEY
+  header: Authorization
+  header_prefix: "Bearer "
+  max_leaders: 3
+  min_score: 10
+  # Leader fills are polled on this interval when wallets.source is chain.
+  # Every leader costs one call per tick, so widening max_leaders multiplies it.
+  activity_poll_s: 30
+  activity_lookback_s: 900
+  # Flags that still admit a leader. Empty means only unflagged wallets are copied;
+  # ranking already refuses insufficient samples and wallets down on open inventory.
+  allowed_flags: []
+  ranking_max_age_s: 21600
+  # Feed staleness, then per-fill copy lag. A fill older than this is never entered.
+  max_feed_age_s: 300
+  max_signal_age_s: 120
+  min_leader_notional_usd: 50
+  seen_memory: 5000
+  cooldown_s: 3600
+  mirror_exits: true
+  max_activity_mb: 4
+  # Separate hypothetical account; venue costs are taken from the dex section.
+  initial_cash: 100
+  ticket_usd: 2
+  max_positions: 3
+  max_drawdown: 0.10
+  max_hold_hours: 24
+  stop_fraction: 0.25
+  trail_fraction: 0.30
+  poll_s: 60
+  mark_every_s: 300
 telegram:
   enabled: false
   token_env: TELEGRAM_BOT_TOKEN
@@ -111,7 +258,7 @@ dex:
   max_positions: 2
   max_drawdown: 0.10
   min_score: 75
-  # Missing enriched security features block new entries by default.
+  # Missing boolean, concentration or creator-risk checks block new entries.
   require_security_checks: true
   max_roundtrip_cost_fraction: 0.03
   slippage_bps: 100
@@ -133,7 +280,7 @@ dex:
   # Position marks become zero for conservative equity after this interval
   # without an executable quote; token inventory remains open/unresolved.
   stale_mark_s: 600
-  # Optional: GET {network},{token},{pool}, see docs/ADAPTERS.md.
+  # Optional: GET {network},{token},{pool}, see docs/DATA.md.
   generic_quote_url: ""
 runtime:
   random_seed: 70431

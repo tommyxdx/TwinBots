@@ -171,6 +171,9 @@ class Ledger:
             else:
                 if not p or qty>p["qty"]+1e-8:
                     raise ValueError("No paper inventory for sale")
+                remaining_fraction = max(0, 1-qty/p["qty"])
+                if "last_value" in p:
+                    p["last_value"] *= remaining_fraction
                 basis = p["cost"]*qty/p["qty"]
                 p["cost"] -= basis
                 p["qty"] -= qty

@@ -43,10 +43,29 @@ class LinearProbability:
         return cls(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
-def fit_temporal(frame, features, min_rows=300, min_positives=25, group_col=None):
+def model_context(cfg, venue):
+    if venue == "cex":
+        return {"interval": cfg["cex"]["interval"], "symbols": sorted(cfg["cex"]["symbols"]),
+                "fee_rate": cfg["cex"]["fee_rate"], "label_extra_cost": .003}
+    return {"network": cfg["scanner"]["network"]}
+
+
+def model_unavailable(data, max_age_s, context, now=None):
+    now = time.time() if now is None else now
+    if data.get("context") != context:
+        return "model_configuration_changed"
+    for name, value in (("model", data.get("created_at")),
+                        ("history", data.get("metrics", {}).get("label_max_time"))):
+        if not isinstance(value, (int, float)) or not np.isfinite(value) or not -5 <= now-value <= max_age_s:
+            return "stale_" + name
+    return None
+
+
+def fit_temporal(frame, features, min_rows=300, min_positives=25, group_col=None, optional_features=None):
     """60/20/20 chronological train/calibration/test; purge overlapping labels."""
     f = frame.sort_values("asof").copy()
-    f = f[f["label_known_at"] <= time.time()]
+    f = f[(f["label_known_at"] <= time.time()) & (f["label_known_at"] > f["asof"])
+          & np.isfinite(f["asof"]) & f["label"].isin([0, 1])]
     if len(f) < min_rows or f["label"].sum() < min_positives or (1-f["label"]).sum() < min_positives:
         return None, {"status": "insufficient_mature_labels", "rows": len(f)}
     times = np.sort(f["asof"].unique())
@@ -59,8 +78,11 @@ def fit_temporal(frame, features, min_rows=300, min_positives=25, group_col=None
         cal = cal[~cal[group_col].isin(train[group_col])]
         test = test[~test[group_col].isin(pd.concat([train[group_col], cal[group_col]]))]
     for name, part in (("train", train), ("calibration", cal), ("test", test)):
-        if len(part) < 30 or part["label"].nunique() < 2 or part["label"].sum() < 5:
+        if len(part) < 30 or part["label"].nunique() < 2 or part["label"].sum() < 5 or (1-part["label"]).sum() < 5:
             return None, {"status": "insufficient_" + name, "rows": len(part)}
+    # Feature availability is learned only on training rows, never from holdout.
+    features = list(features) + [k for k in (optional_features or []) if k in train
+                               and np.isfinite(train[k].to_numpy(float)).mean() >= .8]
     X = train[features].to_numpy(float)
     med = np.array([np.nanmedian(X[:,j]) if np.isfinite(X[:,j]).any() else 0 for j in range(X.shape[1])])
     X = np.where(np.isfinite(X), X, med)
@@ -85,7 +107,9 @@ def fit_temporal(frame, features, min_rows=300, min_positives=25, group_col=None
                "baseline_brier": float(brier_score_loss(test["label"],baseline)),
                "average_precision": float(average_precision_score(test["label"], prediction)), "reliability_bins": bins,
                "test_from": float(t2), "test_through": float(test["asof"].max()),
-               "label_max_time": float(f["label_known_at"].max()),
+               "label_max_time": float(test["label_known_at"].max()), "features": features,
+               "train_label_through": float(train["label_known_at"].max()),
+               "calibration_from": float(t1), "calibration_label_through": float(cal["label_known_at"].max()),
                "warning": "Temporal test, not proof of trading profit; samples remain correlated."}
     d = {"schema":1, "features":features, "median":med.tolist(), "mean":mean.tolist(), "scale":scale.tolist(),
          "coef":lr.coef_[0].tolist(), "intercept":float(lr.intercept_[0]),
@@ -118,6 +142,7 @@ def train_cex(cfg, store):
     model, report = fit_temporal(pd.concat(frames), PRICE_FEATURES, cfg["cex"]["model_min_rows"])
     if model:
         model.data["purpose"] = "cex_6bar_positive_net_close_return"
+        model.data["context"] = model_context(cfg, "cex")
         model.save(store.root / "models" / "cex_gate.json")
     store.set("model:cex", report)
     return report
@@ -176,13 +201,13 @@ def train_scanner(cfg, store):
         g = f[f["target"] == name].copy()
         # Require a complete horizon even for early successful labels.
         g = g[g["label_known_at"] >= g["asof"] + target["horizon_hours"]*3600]
-        features = PRICE_FEATURES+[k for k in SCANNER_EXTRA_FEATURES if k in g and g[k].notna().mean()>=.8]
-        model, report = fit_temporal(g, features, cfg["scanner"]["model_min_rows"],
-                                    cfg["scanner"]["model_min_positives"], "group")
+        model, report = fit_temporal(g, PRICE_FEATURES, cfg["scanner"]["model_min_rows"],
+                                    cfg["scanner"]["model_min_positives"], "group", SCANNER_EXTRA_FEATURES)
         reports[name] = report
         if model:
             model.data["purpose"] = "chart_close_multiple_not_executable_return"
             model.data["target"] = target
+            model.data["context"] = model_context(cfg, "scanner")
             model.save(store.root / "models" / (name + ".json"))
     store.set("model:scanner", reports)
     return reports

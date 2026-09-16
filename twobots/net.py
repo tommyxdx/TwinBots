@@ -11,6 +11,17 @@ import urllib.request
 LOG = logging.getLogger(__name__)
 
 
+class RejectRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # A redirect is a new destination and an unbudgeted request. Never
+        # forward API keys, signed query strings or notification tokens.
+        raise ValueError("HTTP redirects are disabled; configure the final trusted endpoint")
+
+
+def safe_urlopen(req, timeout):
+    return urllib.request.build_opener(RejectRedirects()).open(req, timeout=timeout)
+
+
 def auth_headers(cfg, prefix=""):
     env = cfg.get(prefix + "api_key_env", "")
     value = os.getenv(env, "")
@@ -39,10 +50,10 @@ class HTTP:
                 delay = self.cfg.get("host_intervals", {}).get(parsed.hostname, self.cfg["min_interval_s"])
                 time.sleep(max(0, self.last.get(parsed.hostname, 0) + delay - time.monotonic()))
                 self.last[parsed.hostname] = time.monotonic()
-            req = urllib.request.Request(url, data=body, headers={"User-Agent": "TwinCryptoBots/1.0", **(headers or {})})
+            req = urllib.request.Request(url, data=body, headers={"User-Agent": "TwinCryptoBots/1.2.0", **(headers or {})})
             start = time.monotonic()
             try:
-                with urllib.request.urlopen(req, timeout=self.cfg["timeout_s"]) as r:
+                with safe_urlopen(req, timeout=self.cfg["timeout_s"]) as r:
                     raw = r.read(cap + 1)
                 if len(raw) > cap:
                     raise ValueError("Download exceeds configured size limit")

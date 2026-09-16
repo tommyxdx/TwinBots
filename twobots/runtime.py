@@ -39,31 +39,38 @@ class ProcessLock:
 def maintain(cfg,store,fetcher,bootstrap=False):
     # Separate lock permits scanner/trader commands to share a DB with fetch.
     with ProcessLock(store.root,"maintenance"):
-        if bootstrap:
+        wallet_mode = cfg["scanner"].get("kind", "wallets") == "wallets"
+        if bootstrap and (cfg["cex"]["enabled"] or not wallet_mode):
             fetcher.bootstrap()
-        fetcher.follow_cohort()
+        if not wallet_mode:
+            fetcher.follow_cohort()
         last = store.get("models:last_attempt",0)
         if time.time()-last>86400:
-            train_cex(cfg,store)
-            train_scanner(cfg,store)
+            if cfg["cex"]["enabled"] or not wallet_mode:
+                train_cex(cfg,store)
+            if not wallet_mode:
+                train_scanner(cfg,store)
             store.set("models:last_attempt",time.time())
         # Retain candle history for training. Raw depth/chain logs are never stored.
         cutoff = time.time()-35*86400
         with store.transaction() as db:
             db.execute("DELETE FROM scans WHERE ts<?",(cutoff,))
             db.execute("DELETE FROM events WHERE ts<?",(cutoff,))
-            db.execute("DELETE FROM marks WHERE ts<?",(cutoff,))
+            # Keep the equity path for full-experiment drawdown and forward
+            # validation. Deleting old marks can make a bad experiment look good.
             db.execute("DELETE FROM outbox WHERE ts<? AND status='sent'",(cutoff,))
         store.set("heartbeat:maintenance",time.time())
 
 
 async def maintenance_loop(cfg,store,fetcher):
     while True:
+        # services() already handled the optional startup bootstrap. In
+        # particular, bootstrap_on_start=False must not download immediately.
+        await asyncio.sleep(3600)
         try:
             await asyncio.to_thread(maintain,cfg,store,fetcher,True)
         except Exception as exc:
             LOG.warning("Maintenance incomplete: %s",exc)
-        await asyncio.sleep(3600)
 
 
 async def scanner_loop(scanner,cfg):

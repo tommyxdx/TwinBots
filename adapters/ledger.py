@@ -1,0 +1,261 @@
+"""Build a complete normalized ledger for one wallet.
+
+    python -m adapters.ledger --address <pubkey> --out wallet_ledgers
+
+Transfers, airdrops, token-for-token swaps and batch exits are all recorded in a
+form the accounting can hold open without inventing a cost basis for them. What
+remains unusable is a transaction whose cost has no defensible allocation across
+several acquired tokens; the adapter reports that and writes nothing, rather than
+guessing a split that would decide the wallet's rank.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+from decimal import Decimal
+from pathlib import Path
+import sys
+import time
+import urllib.parse
+import urllib.request
+
+from twobots.config import load_env
+from twobots.wallets import new_position, remove
+
+from .helius import PAGE, Helius, TooMuchHistory
+from .prices import SolPrice, quote_pricer
+from .reconstruct import (classify, normalize, quote_usd, rows_from_normalized,
+                          token_decimals)
+
+DAY = 86400
+USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+JUPITER_QUOTE = "https://api.jup.ag/swap/v1/quote"
+QUALITY = ("complete", "initial_inventory_empty", "all_protocols", "fees_included",
+           "transfers_included", "failed_transactions_included")
+
+
+def inventory(rows):
+    """Replay quantities with the bot's own position arithmetic.
+
+    The proportional split between bought and transferred-in coins is not
+    reproducible by a simpler running total, and a mark that misses it by a
+    rounding step is rejected outright, so the same helpers are reused here.
+    """
+    positions = {}
+    for row in rows:
+        side = row["side"]
+        if side == "fee":
+            continue
+        if side in ("buy", "transfer_in"):
+            position = positions.setdefault(row["token"], new_position(row["ts"]))
+            position["traded_qty" if side == "buy" else "external_qty"] += Decimal(row["quantity"])
+        elif side in ("sell", "transfer_out"):
+            remove(positions[row["token"]], Decimal(row["quantity"]), side)
+        elif side == "swap":
+            out_qty, in_qty = Decimal(row["quantity_out"]), Decimal(row["quantity_in"])
+            traded, _, _ = remove(positions[row["token_out"]], out_qty, "Swap")
+            share = traded / out_qty if out_qty > 0 else Decimal(0)
+            target = positions.setdefault(row["token_in"], new_position(row["ts"]))
+            target["traded_qty"] += in_qty * share
+            target["external_qty"] += in_qty * (Decimal(1) - share)
+        elif side == "batch_sell":
+            for leg in row["legs"]:
+                remove(positions[leg["token"]], Decimal(leg["quantity"]), "Batch leg")
+    return {token: p["traded_qty"] + p["external_qty"] for token, p in positions.items()
+            if p["traded_qty"] > 0 or p["external_qty"] > 0}
+
+
+def jupiter_value_usd(mint, quantity, decimals, timeout=20):
+    """Executable USD value of held inventory, or None when nothing will buy it.
+
+    A routed quote is used rather than an oracle price because the ranking cares
+    what the position could actually be exited for.
+    """
+    raw = int(quantity * (Decimal(10) ** decimals))
+    if raw <= 0:
+        return None
+    query = urllib.parse.urlencode({"inputMint": mint, "outputMint": USDC, "amount": str(raw),
+                                    "slippageBps": 100, "swapMode": "ExactIn"})
+    request = urllib.request.Request(JUPITER_QUOTE + "?" + query,
+                                     headers={"User-Agent": "TwinCryptoBots-Adapter/1.2.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read(1024 * 1024))
+    except Exception:
+        return None
+    if not payload.get("routePlan"):
+        return None
+    return Decimal(payload["outAmount"]) / (Decimal(10) ** 6)
+
+
+def reason_counts(rejected):
+    counts = {}
+    for item in rejected:
+        counts[item["reason"]] = counts.get(item["reason"], 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def activity_mix(entries, address):
+    """Shape of recent activity, without needing USD prices.
+
+    Only each leg's direction matters here, so every quote asset counts as one
+    unit: enough to tell a trader from an address that buys and forwards.
+    """
+    unit = lambda mint, ts: Decimal(1)
+    counts = {}
+    for entry in entries:
+        row = normalize(entry, address)
+        side, _ = classify(row, quote_usd(row, unit))
+        counts[side] = counts.get(side, 0) + 1
+    return counts
+
+
+def build(address, helius, sol_price, now=None, quote_marks=True, max_pages=400,
+          min_history_days=30, max_forwarded=0.8, min_closing_sample=20,
+          max_transactions=60000):
+    """-> (ledger or None, report). None means the wallet cannot be ranked honestly.
+
+    Being unusable is an ordinary outcome, not an error, so the report always
+    says how many transactions were seen and exactly what blocked the rest.
+    """
+    now = time.time() if now is None else now
+    # One recent page shows the shape of the address. Buying thousands of times
+    # and forwarding almost all of it is a distributor or bundler: the outcome
+    # happens at whatever address received the tokens, never here, so its record
+    # is unusable no matter how much of it is reconstructed.
+    sample = list(helius.transactions(address, max_pages=1, sort_order="desc",
+                                      partial_ok=True))
+    mix = activity_mix(sample, address)
+    exits = mix.get("sell", 0) + mix.get("batch_sell", 0)
+    forwarded = mix.get("transfer_out", 0)
+    if forwarded + exits >= min_closing_sample and forwarded / (forwarded + exits) > max_forwarded:
+        return None, {"address": address, "rpc_calls": helius.calls, "usable": False,
+                      "blocked_by": "buys_and_forwards_rather_than_trades", "recent_mix": mix}
+    # Two signature-only pages price the wallet before its full history is bought.
+    # A market maker's ledger costs the entire page budget and is then thrown away
+    # at the cap, so the recent rate is extrapolated over the window first.
+    size = helius.history_size(address)
+    if not size["complete"] and size["oldest"]:
+        per_day = size["transactions"] * DAY / max(now - size["oldest"], 1)
+        projected = per_day * min_history_days
+        if projected > max_pages * PAGE:
+            return None, {"address": address, "rpc_calls": helius.calls, "usable": False,
+                          "blocked_by": "history_exceeds_page_budget",
+                          "transactions_per_day": round(per_day), "projected": round(projected)}
+    # Normalize as it streams and let each transaction's JSON go: holding the raw
+    # form of a long history is measured in gigabytes and is what the process was
+    # being killed for.
+    normalized, decimals, first, seen = [], {}, None, 0
+    try:
+        for entry in helius.transactions(address, max_pages=max_pages):
+            stamp = int(entry["blockTime"])
+            first = stamp if first is None else min(first, stamp)
+            for key in ("preTokenBalances", "postTokenBalances"):
+                for balance in (entry.get("meta") or {}).get(key) or []:
+                    if balance.get("owner") == address:
+                        decimals[balance["mint"]] = int((balance.get("uiTokenAmount") or {})["decimals"])
+            normalized.append(normalize(entry, address))
+            seen += 1
+            if seen > max_transactions:
+                # No single wallet may cost the process its memory: refusing it
+                # is a result, being killed halfway through is not.
+                return None, {"address": address, "rpc_calls": helius.calls, "usable": False,
+                              "blocked_by": "history_exceeds_transaction_budget",
+                              "transactions_seen": seen}
+    except TooMuchHistory as exc:
+        return None, {"address": address, "rpc_calls": helius.calls, "usable": False,
+                      "blocked_by": "history_exceeds_page_budget", "detail": str(exc)}
+    report = {"address": address, "transactions": seen, "rpc_calls": helius.calls}
+    if not seen:
+        return None, {**report, "usable": False, "blocked_by": "no_transactions"}
+    report["history_days"] = int((now - first) / DAY)
+    if first > now - min_history_days * DAY:
+        return None, {**report, "usable": False,
+                      "blocked_by": f"history_shorter_than_{min_history_days}_days"}
+    sol_price.load(first - 3600, now)
+    rows, rejected, skipped = rows_from_normalized(normalized, quote_pricer(sol_price))
+    by_side = reason_counts([{"reason": r["side"]} for r in rows])
+    report.update(usable_rows=len(rows), rows_by_side=by_side, unreconstructable=len(rejected),
+                  reasons=reason_counts(rejected), unclassified=skipped)
+    if rejected:
+        return None, {**report, "usable": False, "blocked_by": "unreconstructable_cost_basis",
+                      "first_rejection_ts": min(i["ts"] for i in rejected)}
+    try:
+        held = inventory(rows)
+    except (ValueError, KeyError) as exc:
+        # The replay does not balance: something was acquired outside what the
+        # deltas show. Unusable, but an ordinary outcome rather than an error.
+        return None, {**report, "usable": False, "blocked_by": "inventory_does_not_reconcile",
+                      "detail": str(exc)[:120]}
+    marks, unpriced = [], []
+    for token, quantity in sorted(held.items()):
+        if quantity < 0:
+            return None, {**report, "usable": False, "blocked_by": "negative_inventory",
+                          "token": token}
+        value = jupiter_value_usd(token, quantity, decimals.get(token, 0)) if quote_marks else None
+        if value is None:
+            # Retained at zero, never dropped: deleting a dead bag would erase the loss.
+            unpriced.append(token)
+            value = Decimal(0)
+        marks.append({"token": token, "quantity": str(quantity), "value_usd": str(value),
+                      "asof": int(now)})
+    ledger = {"schema_version": 1, "currency": "USD", "network": "solana", "address": address,
+              "source": "helius-getTransactionsForAddress+binance-SOLUSDT-1m+jupiter-marks/1.2.0",
+              "history_start": first - 1, "asof": int(now),
+              "quality": {name: True for name in QUALITY},
+              # Spot balance deltas see every protocol that moves a token, but a
+              # perp, loan or LP position never does: its economics live inside
+              # the protocol. Recording the share we could not classify is the
+              # only honest way to say how much of this wallet is not here.
+              "unclassified_transactions": skipped, "classified_transactions": seen - skipped,
+              "transactions": rows, "marks": marks}
+    return ledger, {**report, "usable": True, "open_tokens": len(marks),
+                    "unpriced_inventory_marked_zero": unpriced}
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--address", action="append", required=True,
+                        help="Solana wallet public key; repeat to survey several")
+    parser.add_argument("--out", default="wallet_ledgers", help="Directory for <address>.json")
+    parser.add_argument("--cache", default="data/downloads", help="Kline archive cache")
+    parser.add_argument("--max-pages", type=int, default=400)
+    parser.add_argument("--min-history-days", type=int, default=30,
+                        help="Match wallets.min_history_days in config.yaml")
+    parser.add_argument("--no-quote-marks", action="store_true",
+                        help="Skip Jupiter and mark all open inventory at zero")
+    parser.add_argument("--diagnose", action="store_true",
+                        help="Report why each wallet is or is not usable; write nothing")
+    parser.add_argument("--env", default=".env", help="File to read HELIUS_API_KEY from")
+    args = parser.parse_args(argv)
+    load_env(Path(args.env))
+    helius, sol_price = Helius(), SolPrice(args.cache)
+    out = Path(args.out)
+    reports, written = [], 0
+    for address in args.address:
+        try:
+            ledger, report = build(address, helius, sol_price,
+                                   quote_marks=not args.no_quote_marks and not args.diagnose,
+                                   max_pages=args.max_pages,
+                                   min_history_days=args.min_history_days)
+        except Exception as exc:
+            reports.append({"address": address, "usable": False, "error": str(exc)})
+            continue
+        if ledger is not None and not args.diagnose:
+            out.mkdir(parents=True, exist_ok=True)
+            path = out / (address + ".json")
+            path.write_text(json.dumps(ledger, ensure_ascii=False), encoding="utf-8")
+            report["written"] = str(path)
+            written += 1
+        reports.append(report)
+    usable = sum(1 for r in reports if r.get("usable"))
+    summary = {"checked": len(reports), "usable": usable, "written": written,
+               "rejection_rate": round(1 - usable / len(reports), 3) if reports else None,
+               "rpc_calls": helius.calls, "wallets": reports}
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0 if usable else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

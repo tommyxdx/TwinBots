@@ -9,7 +9,7 @@
 
 ## 配置运行顺序
 
-先运行离线 demo、测试，再 `doctor --online`。让默认 CEX paper 和 scanner 运行；若只想看候选，运行 `scan`。补齐 DEX 报价及安全数据后再把 `dex.enabled` 改为 true，仍然只有模拟。
+先运行离线 demo、测试，再 `doctor --online`。让默认 CEX paper 和 scanner 运行；若只想看候选，运行 `scan`。默认钱包模式保持 `dex.enabled: false` 与 `follow.enabled: false`。钱包数据接入见 `docs/WALLET_DATA.md`，跟单接入见 `docs/COPY_TRADING.md`；只有明确切换旧 `scanner.kind: tokens`、补齐报价与安全数据后才可启用旧 DEX paper。
 
 如使用本地 GET 字段适配器，复制 `adapter.example.json` 为自己的配置，填写两个 upstream URL、输入参数对应名、输出 JSON 字段路径，以及 key 环境变量。先独立启动 `python scripts/adapter_server.py --config YOUR_ADAPTER.json`，然后 bot 使用 `http://127.0.0.1:8787/features?network={network}&token={token}&pool={pool}` 和 `/quote`。桥接器不加载 `.env`；其 key 应由操作系统环境变量提供。缺失字段不补真值，复杂 API 不属于仅字段改名可解决的范围。
 
@@ -40,3 +40,37 @@
 | 策略文件改了但结果难比较 | 每个实验使用不同配置和 data_dir，保留版本及参数；规则/模型实验的起止时间应一致 |
 
 依赖使用主版本范围，未声称冻结所有平台环境。测试环境的实际依赖版本见 `docs/VALIDATION.md`。Python 3.11/3.12 更便于安装预编译依赖；Windows 启动脚本依赖 `python` 命令在 PATH 中。
+
+## 部署到另一台机器（AWS 等）
+
+**不要 scp 整个目录。** `data/state.sqlite3` 是 SQLite WAL 库，运行中的实时状态在 `-wal` 边车文件里；边写边拷得到的是不一致的快照，到了目标机器就是 `database disk image is malformed`。`.git/` 和 `data/` 也占了绝大部分体积，却都不需要传。
+
+正确做法是让目标机器自己拉代码、自己建状态：
+
+```bash
+# 在目标机器上
+git clone https://github.com/<你的账号>/<仓库>.git Twinbots
+cd Twinbots
+python -m venv .venv && source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m twobots init
+```
+
+只有两个文件需要手动传，都很小且在 `.gitignore` 里：
+
+```bash
+scp .env      ec2-user@<host>:~/Twinbots/.env
+scp config.yaml ec2-user@<host>:~/Twinbots/config.yaml
+```
+
+`data/`、`wallet_ledgers/`、`wallet_activity/` 都是派生数据，目标机器会自己重建。代价是账本要重新还原一遍（消耗 RPC 调用），以及**模拟账户和净值历史从头开始**——如果那段记录是你的实验数据，就不能这样重来。
+
+确实需要搬运已有状态时，**先停掉所有 bot**，确认 `state.sqlite3-wal` 是 0 字节，再打包整个 `data/` 目录一起传。
+
+到了目标机器先验证：
+
+```bash
+python -m twobots doctor        # store_integrity 必须是 "ok"
+```
+
+启动时也会自动检查——库损坏会直接拒绝启动并说明原因，而不是每轮打个警告、让 CEX bot 继续假装一切正常。

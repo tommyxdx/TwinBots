@@ -212,6 +212,15 @@ class DexTests(Base):
         self.assertEqual(result["settled_status"],"UNVERIFIABLE_NO_EXECUTION")
         self.assertEqual(d.ledger.state()["cash"],100)
 
+    def test_exhausted_quote_source_does_not_strand_the_order(self):
+        """StopIteration cannot be set on a Future: an escaping one would leave the
+        await pending forever and block every later order on the venue."""
+        d=self.engine([1000])
+        asyncio.run(d.swap("TOKEN","BUY",2_000_000,"test"))
+        self.assertFalse(d.ledger.pending())
+        d.gateway=FixtureQuotes(self.cfg["dex"]["quote_token"],[1000,1000])
+        self.assertEqual(asyncio.run(d.swap("TOKEN","BUY",2_000_000,"test"))["settled_status"],"FILLED")
+
     def test_unquotable_inventory_remains_and_marks_zero(self):
         d=self.engine([1000,1000])
         asyncio.run(d.swap("TOKEN","BUY",2_000_000,"test"))
@@ -297,3 +306,34 @@ class EndToEndTests(Base):
 
 if __name__=="__main__":
     unittest.main()
+
+
+class StoreIntegrityTests(unittest.TestCase):
+    def test_a_corrupt_database_is_refused_at_startup(self):
+        """Copying the directory while a bot runs yields an inconsistent snapshot.
+
+        Undetected it shows up as a warning every cycle while the venues keep
+        logging as though healthy, which is how it went unnoticed for hours.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            Store(root).close()
+            path = root / "state.sqlite3"
+            raw = bytearray(path.read_bytes())
+            # Scribble over a page well past the header, as a truncated or
+            # mid-write copy does.
+            raw[4096:4300] = b"\x00" * 204
+            path.write_bytes(raw)
+            with self.assertRaises(RuntimeError) as caught:
+                Store(root)
+            self.assertIn("corrupt", str(caught.exception))
+            self.assertIn("-wal", str(caught.exception))
+
+    def test_a_healthy_database_opens_and_reopens(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp))
+            store.set("k", {"v": 1})
+            store.close()
+            again = Store(Path(tmp))
+            self.assertEqual(again.get("k"), {"v": 1})
+            again.close()

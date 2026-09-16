@@ -132,12 +132,13 @@ class Fetcher:
                 self.recent_cex(symbol, 1000)
             except Exception as exc:
                 report["errors"].append({"symbol": symbol, "stage": "recent", "error": str(exc)})
-        if h.get("pool_catalog_url"):
+        token_mode = self.cfg["scanner"].get("kind", "wallets") == "tokens"
+        if token_mode and h.get("pool_catalog_url"):
             try:
                 self.import_catalog(h["pool_catalog_url"])
             except Exception as exc:
                 report["errors"].append({"stage": "catalog", "error": str(exc)})
-        if h.get("scanner_dataset_url"):
+        if token_mode and h.get("scanner_dataset_url"):
             try:
                 self.download_scanner_dataset()
             except Exception as exc:
@@ -226,6 +227,11 @@ class Fetcher:
             raw = payload.get("data", {}).get("attributes", {}).get("ohlcv_list", [])
             rows = []
             for ts, o, h, low, close, volume in raw:
+                if not all(number(x) is not None for x in (ts, o, h, low, close, volume)):
+                    continue
+                ts, o, h, low, close, volume = map(float, (ts, o, h, low, close, volume))
+                if ts != int(ts) or int(ts) % 300 or volume < 0:
+                    continue
                 if ts + 300 >= time.time():
                     continue
                 if min(o, h, low, close) <= 0 or low > min(o, close) or h < max(o, close):
