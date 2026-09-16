@@ -51,6 +51,7 @@ def load_config(path="config.yaml"):
                 "max_candidates": 50, "max_wallets_per_run": 2, "refresh_s": 21600,
                 "max_age_s": 21600, "max_ledger_mb": 10, "min_history_days": 30,
                 "min_closed_cycles": 10, "min_closed_tokens": 3,
+                "cycle_dust_fraction": 0.001,
                 "max_censored_cost_fraction": 0.25}
     w = cfg["wallets"] = {**defaults, **cfg.get("wallets", {})}
     # chain builds the ledgers itself from on-chain history; local reads files you
@@ -72,6 +73,8 @@ def load_config(path="config.yaml"):
                 "ledger_max_transactions"):
         if type(w[key]) is not int or w[key] <= 0:
             raise ValueError(f"wallets.{key} must be a positive integer")
+    if not 0 < w["cycle_dust_fraction"] < 0.1:
+        raise ValueError("wallets.cycle_dust_fraction must be a small positive share")
     if not 0 < w["max_censored_cost_fraction"] < 1:
         raise ValueError("wallets.max_censored_cost_fraction must be between 0 and 1")
     # A ledger carries the time it was built, and the ranking refuses one older

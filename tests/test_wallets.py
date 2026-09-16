@@ -249,6 +249,54 @@ class WalletAccounting(unittest.TestCase):
         with self.assertRaises(ValueError):
             analyze_ledger(data, data["address"], now=NOW, min_history_days=90)
 
+    def test_selling_all_but_a_crumb_closes_the_cycle(self):
+        """Measured on real wallets: requiring exactly zero hid ten closed
+        positions behind four, because traders leave dust and a proportional
+        split of mixed-origin inventory leaves a rounding residue."""
+        data = ledger(now=NOW)
+        token = address(950)
+        data["transactions"] += [
+            {"id": "b", "ts": NOW-5000, "side": "buy", "token": token,
+             "quantity": "1000", "notional_usd": "500", "fee_usd": "0"},
+            {"id": "s", "ts": NOW-4000, "side": "sell", "token": token,
+             "quantity": "999.9", "notional_usd": "900", "fee_usd": "0"}]
+        data["marks"].append({"token": token, "quantity": "0.1", "value_usd": "0",
+                              "asof": NOW})
+        base = analyze(ledger(now=NOW))["windows"]["90"]
+        m = analyze(data)["windows"]["90"]
+        self.assertEqual(m["closed_cycles"], base["closed_cycles"] + 1)
+        self.assertEqual(m["wins"], base["wins"] + 1)
+
+    def test_selling_the_crumb_later_is_not_a_second_cycle(self):
+        """A round trip needs a purchase; the leftover is not a new one."""
+        data = ledger(now=NOW)
+        token = address(951)
+        data["transactions"] += [
+            {"id": "b", "ts": NOW-5000, "side": "buy", "token": token,
+             "quantity": "1000", "notional_usd": "500", "fee_usd": "0"},
+            {"id": "s1", "ts": NOW-4000, "side": "sell", "token": token,
+             "quantity": "999.9", "notional_usd": "900", "fee_usd": "0"},
+            {"id": "s2", "ts": NOW-3000, "side": "sell", "token": token,
+             "quantity": "0.1", "notional_usd": "0.01", "fee_usd": "0"}]
+        base = analyze(ledger(now=NOW))["windows"]["90"]
+        m = analyze(data)["windows"]["90"]
+        self.assertEqual(m["closed_cycles"], base["closed_cycles"] + 1)
+        self.assertEqual(m["losses"], base["losses"], "no micro-loss from dust")
+
+    def test_a_genuinely_partial_exit_still_does_not_close(self):
+        data = ledger(now=NOW)
+        token = address(952)
+        data["transactions"] += [
+            {"id": "b", "ts": NOW-5000, "side": "buy", "token": token,
+             "quantity": "1000", "notional_usd": "500", "fee_usd": "0"},
+            {"id": "s", "ts": NOW-4000, "side": "sell", "token": token,
+             "quantity": "500", "notional_usd": "450", "fee_usd": "0"}]
+        data["marks"].append({"token": token, "quantity": "500", "value_usd": "400",
+                              "asof": NOW})
+        base = analyze(ledger(now=NOW))["windows"]["90"]
+        self.assertEqual(analyze(data)["windows"]["90"]["closed_cycles"],
+                         base["closed_cycles"], "half sold is not a round trip")
+
     def test_invalid_identity_duplicate_and_nonfinite_amount_rejected(self):
         original = ledger(now=NOW)
         modifications = [lambda d: d.update(network="ethereum"), lambda d: d.update(asof=NOW+100),

@@ -55,7 +55,23 @@ def ratio(a, b):
 def new_position(ts):
     """Inventory split by origin. Externally received coins carry no cost basis."""
     return {"traded_qty": Decimal(0), "traded_cost": Decimal(0), "external_qty": Decimal(0),
-            "pnl": Decimal(0), "sold_cost": Decimal(0), "opened": ts}
+            "peak_qty": Decimal(0), "pnl": Decimal(0), "sold_cost": Decimal(0),
+            "funded": False, "opened": ts}
+
+
+def exhausted(position, dust_fraction):
+    """Has the traded side of this position effectively been exited?
+
+    A trader who sells 99.98% and leaves a crumb has closed that position, and so
+    has one whose exit leaves a rounding residue from splitting a mixed-origin
+    holding. Requiring exactly zero counted neither: measured on real wallets it
+    hid ten closed positions behind four, which is the difference between a
+    wallet that plainly trades and one refused for an insufficient sample.
+    """
+    if position["traded_qty"] <= 0:
+        return True
+    return (position["peak_qty"] > 0
+            and position["traded_qty"] <= position["peak_qty"] * dust_fraction)
 
 
 def remove(position, quantity, what):
@@ -86,7 +102,7 @@ def remove(position, quantity, what):
 
 
 def analyze_ledger(data, address, network="solana", now=None, max_age_s=21600,
-                   min_history_days=30):
+                   min_history_days=30, cycle_dust_fraction="0.001"):
     now = time.time() if now is None else now
     if network != "solana" or not valid_address(address):
         raise ValueError("Wallet ranking currently requires a Solana public address")
@@ -112,6 +128,7 @@ def analyze_ledger(data, address, network="solana", now=None, max_age_s=21600,
     rows = data.get("transactions")
     if not isinstance(rows, list) or len(rows) > 50000:
         raise ValueError("Expected at most 50000 fully paginated transactions")
+    dust_fraction = decimal(cycle_dust_fraction, "cycle_dust_fraction")
     positions, sales, cycles, expenses, activity, seen = {}, [], [], [], [], set()
     external_sales, censored_cost, deployed_cost, estimated = [], Decimal(0), Decimal(0), 0
     previous = start
@@ -126,10 +143,12 @@ def analyze_ledger(data, address, network="solana", now=None, max_age_s=21600,
         """End a round trip. A censored exit realised nothing observable, so it
         contributes no win or loss even though its earlier sales still count."""
         p = positions[token]
-        if p["sold_cost"] > 0 and not censored:
+        if p["funded"] and p["sold_cost"] > 0 and not censored:
             cycles.append({"ts": ts, "opened": p["opened"], "token": token,
                            "pnl": p["pnl"], "cost": p["sold_cost"]})
         p["pnl"], p["sold_cost"], p["opened"] = Decimal(0), Decimal(0), ts
+        # The crumb left behind is not a new round trip until it is bought into.
+        p["peak_qty"], p["funded"] = p["traded_qty"], False
         if p["traded_qty"] <= 0 and p["external_qty"] <= 0:
             del positions[token]
 
@@ -147,7 +166,7 @@ def analyze_ledger(data, address, network="solana", now=None, max_age_s=21600,
         if external > 0:
             external_share = Decimal(1) - traded_share
             external_sales.append({"ts": ts, "pnl": amount * external_share - fee * external_share})
-        if p["traded_qty"] <= 0:
+        if exhausted(p, dust_fraction):
             close_cycle(token, ts)
 
     for row in rows:
@@ -179,6 +198,8 @@ def analyze_ledger(data, address, network="solana", now=None, max_age_s=21600,
                 p = positions.setdefault(token, new_position(ts))
                 p["traded_qty"] += qty
                 p["traded_cost"] += amount + fee
+                p["peak_qty"] = max(p["peak_qty"], p["traded_qty"])
+                p["funded"] = True
                 deployed_cost += amount + fee
             else:
                 sell_from(token, qty, amount, fee, ts)
@@ -197,7 +218,7 @@ def analyze_ledger(data, address, network="solana", now=None, max_age_s=21600,
                     raise ValueError("Transfer out exceeds known inventory")
                 traded, cost, external = remove(p, qty, "Transfer out")
                 censored_cost += cost
-                if p["traded_qty"] <= 0:
+                if exhausted(p, dust_fraction):
                     close_cycle(token, ts, censored=cost > 0)
         elif side == "swap":
             out_token, in_token = token_of(row, "token_out"), token_of(row, "token_in")
@@ -214,13 +235,15 @@ def analyze_ledger(data, address, network="solana", now=None, max_age_s=21600,
             # supplies. Total profit stays exact; only the cycle count drops.
             share = traded / out_qty if out_qty > 0 else Decimal(0)
             carried_pnl, carried_sold = source["pnl"], source["sold_cost"]
-            opened = source["opened"]
+            opened, source_funded = source["opened"], source["funded"]
             source["pnl"], source["sold_cost"] = Decimal(0), Decimal(0)
             if source["traded_qty"] <= 0 and source["external_qty"] <= 0:
                 del positions[out_token]
             target = positions.setdefault(in_token, new_position(opened))
             target["traded_qty"] += in_qty * share
             target["traded_cost"] += cost + fee
+            target["peak_qty"] = max(target["peak_qty"], target["traded_qty"])
+            target["funded"] = target["funded"] or source_funded
             target["external_qty"] += in_qty * (Decimal(1) - share)
             target["pnl"] += carried_pnl
             target["sold_cost"] += carried_sold

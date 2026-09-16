@@ -110,6 +110,10 @@ wallets:
   min_history_days: 30
   min_closed_cycles: 10
   min_closed_tokens: 3
+  # A position sold down to this share of its peak counts as exited. Traders
+  # leave dust and a proportional split of mixed-origin inventory leaves a
+  # rounding residue; requiring exactly zero never closed either.
+  cycle_dust_fraction: 0.001
   # Inventory transferred out is an outcome nobody can observe. Above this share
   # of deployed cost the record no longer shows what the wallet actually did.
   max_censored_cost_fraction: 0.25

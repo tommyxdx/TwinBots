@@ -116,7 +116,8 @@ class WalletScanner:
             try:
                 ledger = self.read_ledger(address)
                 analyze_ledger(ledger, address, self.network, now, self.c["max_age_s"],
-                               self.c["min_history_days"])
+                               self.c["min_history_days"],
+                               self.c["cycle_dust_fraction"])
                 state["ledger"] = ledger
             except FileNotFoundError:
                 state["error"] = "No local ledger; supply complete historical data for this address"
@@ -139,7 +140,8 @@ class WalletScanner:
                 continue
             try:
                 analyses.append(analyze_ledger(state["ledger"], address, self.network, now,
-                                               self.c["max_age_s"], self.c["min_history_days"]))
+                                               self.c["max_age_s"], self.c["min_history_days"],
+                                               self.c["cycle_dust_fraction"]))
             except (ValueError, KeyError, TypeError) as exc:
                 unavailable.append({"address": address, "status": "unavailable", "reason": str(exc)})
         result = {"generated_at": now, "network": self.network, "kind": "wallets",
