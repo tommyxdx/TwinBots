@@ -271,6 +271,7 @@ def doctor(cfg,store,http,online):
               "copy_activity_source":cfg["follow"]["source"],
               "copy_activity_dir":cfg["follow"]["activity_dir"],
               "copy_adapter_configured":bool(cfg["follow"]["url_template"]),
+              "store_integrity":store.db.execute("PRAGMA quick_check(1)").fetchone()[0],
               "note":"Wallet discovery does not provide complete cost history. Supply normalized ledgers for ranking; no trading keys needed."}
     if online:
         checks = {}

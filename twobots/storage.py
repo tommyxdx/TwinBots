@@ -20,6 +20,7 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=30000")
+        self.verify()
         self.db.executescript("""
         CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY,v TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,ts REAL,kind TEXT,payload TEXT);
@@ -38,6 +39,26 @@ class Store:
         CREATE TABLE IF NOT EXISTS requests(day TEXT PRIMARY KEY,n INTEGER NOT NULL);
         """)
         self.db.commit()
+
+    def verify(self):
+        """Refuse a corrupt database at startup rather than limping on it.
+
+        Live state sits in the -wal sidecar, so copying the directory while a bot
+        is running yields an inconsistent snapshot. Left undetected it surfaces
+        as a warning every cycle while the venues keep logging as though healthy,
+        which can go unnoticed for hours.
+        """
+        try:
+            state = self.db.execute("PRAGMA quick_check(1)").fetchone()[0]
+        except sqlite3.DatabaseError as exc:
+            state = str(exc)
+        if state != "ok":
+            raise RuntimeError(
+                f"{self.root / 'state.sqlite3'} is corrupt ({state}). A directory copied while a "
+                "bot was running is the usual cause: SQLite keeps live state in the -wal sidecar "
+                "and a mid-write copy is inconsistent. Stop every bot first, then either re-copy "
+                "it or delete the data directory and let it rebuild — rebuilding restarts the "
+                "paper accounts and their mark history, so keep a copy if that record matters.")
 
     @contextmanager
     def transaction(self):
