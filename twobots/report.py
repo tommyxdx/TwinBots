@@ -48,6 +48,14 @@ def build_report(cfg,store):
                                                 default=0)} if builds else None
     wallet_report = store.get("wallet:latest")
     if wallet_report is not None:
+        # Which provider nominated each wallet, beside what we measured. The
+        # disagreement is the point: a leaderboard's PnL uses its own cost
+        # conventions and cannot be checked from outside.
+        nominated = (store.get("wallet:shortlist") or {}).get("sources", {})
+        for row in wallet_report["ranking"]:
+            row["nominated_by"] = nominated.get(row["address"], [])
+        for row in wallet_report["unavailable"]:
+            row["nominated_by"] = nominated.get(row["address"], [])
         wallet_report["report_age_s"] = time.time() - wallet_report["generated_at"]
         wallet_report["stale"] = wallet_report["report_age_s"] > cfg["wallets"]["max_age_s"] or any(
             time.time() - row["asof"] > cfg["wallets"]["max_age_s"] for row in wallet_report["ranking"])
@@ -98,18 +106,22 @@ def export_report(cfg,store):
         rows = []
         for wallet in wallets["ranking"]:
             m = wallet["windows"]["90"]
-            values = [wallet["rank"] or "观察", wallet["address"], fmt(m["realized_pnl_usd"]),
+            values = [wallet["rank"] or "观察", wallet["address"],
+                      "、".join(wallet.get("nominated_by") or []) or "自行发现",
+                      fmt(m["realized_pnl_usd"]),
                       fmt(m["cost_roi"], True), m["closed_cycles"], m["trade_fills"], fmt(m["win_rate"], True),
                       fmt(m["profit_factor"]), fmt(m["without_best_token_pnl_usd"]), fmt(wallet["open_loss_usd"]),
                       fmt(m["external_origin_pnl_usd"]), fmt(wallet["censored_cost_fraction"], True),
                       fmt(wallet["score"])]
             rows.append("<tr>" + "".join("<td>" + html.escape(str(v)) + "</td>" for v in values) + "</tr>")
-        headings = ["排名", "钱包地址", "已实现净盈亏 $", "已售成本收益率", "完整平仓", "成交次数", "胜率",
+        headings = ["排名", "钱包地址", "谁推荐的", "已实现净盈亏 $", "已售成本收益率", "完整平仓", "成交次数", "胜率",
                     "Profit Factor", "去掉最大盈利币后 $", "未平仓亏损 $", "转入币盈亏 $", "记录缺口",
                     "研究分数"]
         cards.append("<section><h2>钱包历史表现 · 90 天</h2><p>"
                      + ("数据已过期，请重新扫描。" if wallets["stale"] else "各钱包数据截止时间见审计明细。")
                      + "胜率按完整持仓周期计算，跨窗口周期不计入胜率；分数不是盈利概率。"
+                     + "「谁推荐的」是把这个地址列入候选的平台。平台的盈亏口径与本程序不同，"
+                     + "也无法从外部核对——两边不一致时，以本表这些可复核的数字为准。"
                      + "转入币盈亏来自空投或从其它地址转入的库存，不计入收益率和胜率；"
                      + "记录缺口是转出到其它地址的成本占比，越高说明这个钱包的实际去向越看不到。"
                      + f"数据不足的钱包：{len(wallets['unavailable'])} 个。</p><div style='overflow-x:auto'><table><thead><tr>"
