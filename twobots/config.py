@@ -52,7 +52,7 @@ def load_config(path="config.yaml"):
                 "max_age_s": 21600, "max_ledger_mb": 10, "min_history_days": 30,
                 "min_closed_cycles": 10, "min_closed_tokens": 3,
                 "cycle_dust_fraction": 0.001,
-                "max_censored_cost_fraction": 0.25}
+                "max_censored_cost_fraction": 0.25, "max_unclassified_fraction": 0.5}
     w = cfg["wallets"] = {**defaults, **cfg.get("wallets", {})}
     # chain builds the ledgers itself from on-chain history; local reads files you
     # supply; adapter fetches them from a service you run.
@@ -77,6 +77,8 @@ def load_config(path="config.yaml"):
         raise ValueError("wallets.cycle_dust_fraction must be a small positive share")
     if not 0 < w["max_censored_cost_fraction"] < 1:
         raise ValueError("wallets.max_censored_cost_fraction must be between 0 and 1")
+    if not 0 < w["max_unclassified_fraction"] < 1:
+        raise ValueError("wallets.max_unclassified_fraction must be between 0 and 1")
     # A ledger carries the time it was built, and the ranking refuses one older
     # than max_age_s. Rebuilding less often than that leaves every ledger dead
     # for the difference, which looks exactly like nothing being ranked at all.

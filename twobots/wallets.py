@@ -125,6 +125,10 @@ def analyze_ledger(data, address, network="solana", now=None, max_age_s=21600,
         raise ValueError("Unverified ledger coverage: " + ", ".join(missing))
     if start > now - min_history_days * DAY:
         raise ValueError(f"Need at least {min_history_days} days of history and earlier cost basis")
+    unclassified = data.get("unclassified_transactions", 0)
+    classified = data.get("classified_transactions")
+    if type(unclassified) is not int or unclassified < 0:
+        raise ValueError("unclassified_transactions must be a non-negative integer")
     rows = data.get("transactions")
     if not isinstance(rows, list) or len(rows) > 50000:
         raise ValueError("Expected at most 50000 fully paginated transactions")
@@ -369,6 +373,12 @@ def analyze_ledger(data, address, network="solana", now=None, max_age_s=21600,
             "open_external_value_usd": float(open_external_value),
             "censored_cost_usd": float(censored_cost),
             "censored_cost_fraction": ratio(censored_cost, deployed_cost) or 0.0,
+            "unclassified_transactions": unclassified,
+            "unclassified_fraction": ratio(Decimal(unclassified),
+                                           Decimal(unclassified + (classified if isinstance(classified, int)
+                                                                   else len(rows)))) or 0.0,
+            "unclassified_note": "Transactions moving no research token: cash movement, but also "
+                                 "perp, lending and LP positions this cannot see",
             "estimated_allocation_rows": estimated,
             "external_origin_pnl_note": "Profit from transferred-in inventory, excluded from cost_roi and cycles",
             "windows": windows}
@@ -376,12 +386,13 @@ def analyze_ledger(data, address, network="solana", now=None, max_age_s=21600,
 
 WALLET_FLAGS = ("insufficient_independent_sample", "profit_concentrated_in_one_token",
                 "not_profitable_without_best_token", "realized_profit_does_not_cover_open_losses",
-                "record_materially_censored", "allocation_estimated")
+                "record_materially_censored", "allocation_estimated", "activity_partly_invisible")
 BLOCKING_FLAGS = ("insufficient_independent_sample", "realized_profit_does_not_cover_open_losses",
                   "record_materially_censored")
 
 
-def rank_wallets(analyses, min_cycles=10, min_tokens=3, max_censored_fraction=.25):
+def rank_wallets(analyses, min_cycles=10, min_tokens=3, max_censored_fraction=.25,
+                 max_unclassified_fraction=.5):
     results = []
     for item in analyses:
         result = dict(item)
@@ -404,6 +415,12 @@ def rank_wallets(analyses, min_cycles=10, min_tokens=3, max_censored_fraction=.2
             flags.append("record_materially_censored")
         if item["estimated_allocation_rows"]:
             flags.append("allocation_estimated")
+        # Spot balance deltas see every protocol that moves a token, but a perp,
+        # loan or LP position never does — its economics stay inside the
+        # protocol. A wallet whose transactions are mostly unclassifiable may be
+        # trading somewhere this cannot look at all.
+        if item["unclassified_fraction"] > max_unclassified_fraction:
+            flags.append("activity_partly_invisible")
         confidence = (m["closed_cycles"] / (m["closed_cycles"] + 20)
                       * min(1, m["closed_tokens"] / 8) ** .5
                       * min(1, m["active_weeks"] / 6) ** .5)

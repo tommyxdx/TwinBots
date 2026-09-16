@@ -117,6 +117,10 @@ wallets:
   # Inventory transferred out is an outcome nobody can observe. Above this share
   # of deployed cost the record no longer shows what the wallet actually did.
   max_censored_cost_fraction: 0.25
+  # Balance deltas see every protocol that moves a token, and none that does not:
+  # a perp, loan or LP position lives inside the protocol. Above this share of
+  # unclassifiable transactions the wallet may be trading where this cannot look.
+  max_unclassified_fraction: 0.5
 shortlist:
   # Candidate addresses from providers that have already indexed the chain. This
   # is a coarse screen deciding what gets reconstructed, never a ranking: their

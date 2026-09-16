@@ -173,10 +173,10 @@ def build(address, helius, sol_price, now=None, quote_marks=True, max_pages=400,
         return None, {**report, "usable": False,
                       "blocked_by": f"history_shorter_than_{min_history_days}_days"}
     sol_price.load(first - 3600, now)
-    rows, rejected = rows_from_normalized(normalized, quote_pricer(sol_price))
+    rows, rejected, skipped = rows_from_normalized(normalized, quote_pricer(sol_price))
     by_side = reason_counts([{"reason": r["side"]} for r in rows])
     report.update(usable_rows=len(rows), rows_by_side=by_side, unreconstructable=len(rejected),
-                  reasons=reason_counts(rejected))
+                  reasons=reason_counts(rejected), unclassified=skipped)
     if rejected:
         return None, {**report, "usable": False, "blocked_by": "unreconstructable_cost_basis",
                       "first_rejection_ts": min(i["ts"] for i in rejected)}
@@ -203,6 +203,11 @@ def build(address, helius, sol_price, now=None, quote_marks=True, max_pages=400,
               "source": "helius-getTransactionsForAddress+binance-SOLUSDT-1m+jupiter-marks/1.2.0",
               "history_start": first - 1, "asof": int(now),
               "quality": {name: True for name in QUALITY},
+              # Spot balance deltas see every protocol that moves a token, but a
+              # perp, loan or LP position never does: its economics live inside
+              # the protocol. Recording the share we could not classify is the
+              # only honest way to say how much of this wallet is not here.
+              "unclassified_transactions": skipped, "classified_transactions": seen - skipped,
               "transactions": rows, "marks": marks}
     return ledger, {**report, "usable": True, "open_tokens": len(marks),
                     "unpriced_inventory_marked_zero": unpriced}

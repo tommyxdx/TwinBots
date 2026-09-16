@@ -297,6 +297,30 @@ class WalletAccounting(unittest.TestCase):
         self.assertEqual(analyze(data)["windows"]["90"]["closed_cycles"],
                          base["closed_cycles"], "half sold is not a round trip")
 
+    def test_a_wallet_whose_activity_is_mostly_invisible_is_flagged(self):
+        """A perp, loan or LP position never moves a token balance here, so its
+        economics are simply absent. Measured on real wallets, a third to two
+        thirds of their transactions classify as nothing at all."""
+        data = ledger(now=NOW)
+        visible = len(data["transactions"])
+        data["classified_transactions"] = visible
+        data["unclassified_transactions"] = visible * 3
+        result = rank_wallets([analyze(data)])[0]
+        self.assertGreater(result["windows"]["90"]["realized_pnl_usd"], 0)
+        self.assertAlmostEqual(result["unclassified_fraction"], 0.75)
+        self.assertIn("activity_partly_invisible", result["flags"])
+        # Visible and profitable, so it still ranks; the copy trader refuses any
+        # flag by default, which is where the caution belongs.
+        self.assertIsNotNone(result["score"])
+
+    def test_a_wallet_with_nothing_hidden_carries_no_such_flag(self):
+        data = ledger(now=NOW)
+        data["classified_transactions"] = len(data["transactions"])
+        data["unclassified_transactions"] = 0
+        result = rank_wallets([analyze(data)])[0]
+        self.assertEqual(result["unclassified_fraction"], 0)
+        self.assertNotIn("activity_partly_invisible", result["flags"])
+
     def test_invalid_identity_duplicate_and_nonfinite_amount_rejected(self):
         original = ledger(now=NOW)
         modifications = [lambda d: d.update(network="ethereum"), lambda d: d.update(asof=NOW+100),

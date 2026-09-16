@@ -147,7 +147,8 @@ class WalletScanner:
         result = {"generated_at": now, "network": self.network, "kind": "wallets",
                   "source_mode": self.c["source"], "candidate_count": len(addresses),
                   "ranking": rank_wallets(analyses, self.c["min_closed_cycles"], self.c["min_closed_tokens"],
-                                          self.c["max_censored_cost_fraction"]),
+                                          self.c["max_censored_cost_fraction"],
+                                          self.c["max_unclassified_fraction"]),
                   "unavailable": unavailable,
                   "note": "Historical research only. Provider coverage is not independently verified. A rank is not evidence that copying the wallet is profitable.",
                   "discovery_note": "Recent pool senders are candidates, not verified beneficial owners or a full-chain sample"}

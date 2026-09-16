@@ -157,7 +157,8 @@ def classify(row, quote_value):
 
 def ledger_rows(entries, address, price_usd):
     """Convenience wrapper: normalize raw transactions, then reduce them."""
-    return rows_from_normalized([normalize(e, address) for e in entries], price_usd)
+    rows, rejected, _ = rows_from_normalized([normalize(e, address) for e in entries], price_usd)
+    return rows, rejected
 
 
 def rows_from_normalized(normalized, price_usd):
@@ -170,10 +171,14 @@ def rows_from_normalized(normalized, price_usd):
 
     `price_usd(mint, ts)` returns the USD price of one unit of a quote asset.
     """
-    rows, rejected = [], []
+    rows, rejected, skipped = [], [], 0
     for row in sorted(normalized, key=lambda r: (r["ts"], r["slot"], r["order"])):
         side, payload = classify(row, quote_usd(row, price_usd))
         if side == "skip":
+            # Nothing the wallet holds as a research asset moved. Ordinary cash
+            # movement looks like this — and so does a perp, lending or LP
+            # position, whose economics never touch a token balance here.
+            skipped += 1
             continue
         if side == "unsupported":
             rejected.append({"signature": row["signature"], "ts": row["ts"],
@@ -186,4 +191,4 @@ def rows_from_normalized(normalized, price_usd):
             entry[key] = ([{"token": leg["token"], "quantity": str(leg["quantity"])}
                            for leg in value] if key == "legs" else str(value))
         rows.append(entry)
-    return rows, rejected
+    return rows, rejected, skipped
