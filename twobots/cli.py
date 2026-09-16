@@ -21,7 +21,7 @@ from .runtime import ProcessLock,maintain,maintenance_loop,scanner_loop
 from .cex import CexPaper
 from .dex import DexPaper,QuoteGateway
 from .follow import ActivityFeed,CopyTrader
-from .report import export_report
+from .report import export_report,forward_test
 from .demo import run_demo
 
 
@@ -180,42 +180,6 @@ def snapshot_ranking(cfg,store):
                          r["windows"]["90"]["cost_roi"],r["censored_cost_fraction"],
                          json.dumps(r["flags"])) for r in report["ranking"]])
     return {"snapshot":True,"at":now,"wallets":len(report["ranking"])}
-
-
-def forward_test(store,horizon_days=7):
-    """Did a high rank at time T predict what the wallet did over the next week?
-
-    The 7-day window read `horizon_days` later covers exactly the period after
-    the ranking, so it is the forward result and not a restatement of the same
-    history. Nothing here is an execution result: it measures the ranking alone,
-    free of lag, slippage and fees.
-    """
-    stamps = [r["ts"] for r in store.rows("SELECT DISTINCT ts FROM rankings ORDER BY ts")]
-    if len(stamps) < 2:
-        return {"pairs":0,"note":f"Need two snapshots {horizon_days} days apart; have {len(stamps)}"}
-    pairs = []
-    for early in stamps:
-        later = next((t for t in stamps if t-early >= horizon_days*86400*0.9), None)
-        if later is None:
-            continue
-        ranked = {r["address"]:r for r in store.rows(
-            "SELECT * FROM rankings WHERE ts=? AND score IS NOT NULL",(early,))}
-        after = {r["address"]:r for r in store.rows("SELECT * FROM rankings WHERE ts=?",(later,))}
-        both = [(ranked[a],after[a]) for a in ranked
-                if a in after and after[a]["roi7"] is not None]
-        if len(both) < 4:
-            continue
-        both.sort(key=lambda x:-x[0]["score"])
-        half = len(both)//2
-        top = [b["roi7"] for _,b in both[:half]]
-        bottom = [b["roi7"] for _,b in both[half:]]
-        pairs.append({"ranked_at":early,"measured_at":later,"wallets":len(both),
-                      "top_half_mean_roi7":round(sum(top)/len(top),4),
-                      "bottom_half_mean_roi7":round(sum(bottom)/len(bottom),4),
-                      "separation":round(sum(top)/len(top)-sum(bottom)/len(bottom),4)})
-    return {"pairs":len(pairs),"horizon_days":horizon_days,"results":pairs,
-            "note":"Forward result of the ranking itself. A positive separation is "
-                   "evidence only across many pairs, never from one."}
 
 
 async def ledger_loop(cfg,store):

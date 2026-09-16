@@ -5,6 +5,42 @@ import time
 from pathlib import Path
 
 
+def forward_test(store,horizon_days=7):
+    """Did a high rank at time T predict what the wallet did over the next week?
+
+    The 7-day window read `horizon_days` later covers exactly the period after
+    the ranking, so it is the forward result and not a restatement of the same
+    history. Nothing here is an execution result: it measures the ranking alone,
+    free of lag, slippage and fees.
+    """
+    stamps = [r["ts"] for r in store.rows("SELECT DISTINCT ts FROM rankings ORDER BY ts")]
+    if len(stamps) < 2:
+        return {"pairs":0,"note":f"Need two snapshots {horizon_days} days apart; have {len(stamps)}"}
+    pairs = []
+    for early in stamps:
+        later = next((t for t in stamps if t-early >= horizon_days*86400*0.9), None)
+        if later is None:
+            continue
+        ranked = {r["address"]:r for r in store.rows(
+            "SELECT * FROM rankings WHERE ts=? AND score IS NOT NULL",(early,))}
+        after = {r["address"]:r for r in store.rows("SELECT * FROM rankings WHERE ts=?",(later,))}
+        both = [(ranked[a],after[a]) for a in ranked
+                if a in after and after[a]["roi7"] is not None]
+        if len(both) < 4:
+            continue
+        both.sort(key=lambda x:-x[0]["score"])
+        half = len(both)//2
+        top = [b["roi7"] for _,b in both[:half]]
+        bottom = [b["roi7"] for _,b in both[half:]]
+        pairs.append({"ranked_at":early,"measured_at":later,"wallets":len(both),
+                      "top_half_mean_roi7":round(sum(top)/len(top),4),
+                      "bottom_half_mean_roi7":round(sum(bottom)/len(bottom),4),
+                      "separation":round(sum(top)/len(top)-sum(bottom)/len(bottom),4)})
+    return {"pairs":len(pairs),"horizon_days":horizon_days,"results":pairs,
+            "note":"Forward result of the ranking itself. A positive separation is "
+                   "evidence only across many pairs, never from one."}
+
+
 def build_report(cfg,store):
     accounts = {}
     for venue in ("cex","dex","copy"):
@@ -72,6 +108,7 @@ def build_report(cfg,store):
             "recent_errors":store.rows("SELECT ts,kind,payload FROM events WHERE kind LIKE '%error%' OR kind LIKE '%unavailable%' ORDER BY id DESC LIMIT 20"),
             "heartbeats":{k:store.get("heartbeat:"+k) for k in ("cex","dex","copy","scanner","maintenance")},
             "copy_leaders":store.get("copy:leaders"),
+            "forward_test":forward_test(store),
             "recent_copy_entries":store.rows("SELECT ts,payload FROM events WHERE kind='copy_entry_result' ORDER BY id DESC LIMIT 20"),
             "assumptions":{
                 "cex_latency_ms":cfg["cex"]["latency_ms"],"visible_depth_fraction":cfg["cex"]["visible_liquidity_fraction"],
@@ -136,6 +173,25 @@ def export_report(cfg,store):
                      + "。</p><p>拒绝原因：" + html.escape(reasons)
                      + "。转入、转出、代币互换和批量卖出都已入账，不构成拒绝；"
                      + "剩下的主要是一笔买入多个代币和历史太短。</p></section>")
+    forward = report["forward_test"]
+    if forward["pairs"]:
+        rows = "".join(
+            "<tr>" + "".join("<td>" + html.escape(str(v)) + "</td>" for v in (
+                time.strftime("%m-%d %H:%M", time.localtime(p["ranked_at"])),
+                time.strftime("%m-%d %H:%M", time.localtime(p["measured_at"])),
+                p["wallets"], f"{p['top_half_mean_roi7']:.1%}",
+                f"{p['bottom_half_mean_roi7']:.1%}", f"{p['separation']:+.1%}")) + "</tr>"
+            for p in forward["results"][-10:])
+        cards.append("<section><h2>排名前瞻检验</h2><p>用排名之后那一周的实际收益率，"
+                     "对比当时排名的上半区与下半区。没有延迟、滑点和手续费，"
+                     "只检验排名本身有没有预测力。<b>分离度要持续为正才算证据，单个数据点不算。</b>"
+                     "</p><div style='overflow-x:auto'><table><thead><tr>"
+                     + "".join("<th>" + h + "</th>" for h in
+                               ["排名于", "检验于", "钱包数", "上半区 7 天", "下半区 7 天", "分离度"])
+                     + "</tr></thead><tbody>" + rows + "</tbody></table></div></section>")
+    elif forward.get("note"):
+        cards.append("<section><h2>排名前瞻检验</h2><p>" + html.escape(forward["note"])
+                     + "　快照每天自动保存，事后无法补。</p></section>")
     leaders = report["copy_leaders"]
     if cfg["follow"]["enabled"] and leaders is not None:
         entries = [json.loads(row["payload"]) for row in report["recent_copy_entries"]]

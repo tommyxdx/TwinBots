@@ -401,3 +401,30 @@ def test_a_ranking_is_snapshotted_once_per_interval(env):
     # snapshot per scan would be noise rather than history.
     assert snapshot_ranking(cfg, store)["snapshot"] is False
     assert store.rows("SELECT count(*) AS n FROM rankings")[0]["n"] == 1
+
+
+def test_the_forward_result_reaches_the_report(env):
+    """`run` is what stays up and the report is what gets read, so a result that
+    needs its own command to see is a result nobody looks at."""
+    import time
+    from twobots.report import build_report, export_report
+    cfg, store, _ = env
+    now = time.time()
+    wallets = [A, B, C, "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+               "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
+               "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr"]
+    snapshot_rows(store, now - 8 * 86400,
+                  [(a, i + 1, 50 - i * 5, None) for i, a in enumerate(wallets)])
+    snapshot_rows(store, now,
+                  [(a, i + 1, 50 - i * 5, 0.2 if i < 3 else -0.1)
+                   for i, a in enumerate(wallets)])
+    assert build_report(cfg, store)["forward_test"]["results"][0]["separation"] == 0.3
+    html = Path(export_report(cfg, store)).read_text(encoding="utf-8")
+    assert "排名前瞻检验" in html
+
+
+def test_the_report_says_so_before_there_is_anything_to_compare(env):
+    from twobots.report import export_report
+    cfg, store, _ = env
+    html = Path(export_report(cfg, store)).read_text(encoding="utf-8")
+    assert "两" in html or "two snapshots" in html or "快照" in html
