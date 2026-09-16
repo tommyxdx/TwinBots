@@ -602,6 +602,43 @@ def test_an_ordinary_agent_wallet_now_ranks():
     assert "allocation_estimated" in result["flags"]
 
 
+def test_a_huge_history_is_refused_before_it_costs_the_process_its_memory():
+    """Holding raw transactions killed the run: 13 KB each, 200k at the page cap,
+    about 2.5 GB. No single wallet may take the process down with it."""
+    import time
+    from adapters.ledger import build
+    now = time.time()
+    many = [usdc_swap(f"h{i}", int(now - 60 * DAY + i), BONK, 1, -1, slot=i) for i in range(60)]
+    ledger, report = build(WALLET, FakeHelius(many), FakeSolPrice(), now=now,
+                           quote_marks=False, max_transactions=50)
+    assert ledger is None
+    assert report["blocked_by"] == "history_exceeds_transaction_budget"
+    assert report["transactions_seen"] == 51, "it stops at the cap, not after the whole history"
+
+
+def test_normalized_rows_are_a_fraction_of_the_raw_transaction():
+    """The reduction is the whole reason the stream can be dropped as it goes."""
+    import sys as _sys
+    from adapters.reconstruct import normalize
+
+    def deep(obj, seen=None):
+        seen = seen if seen is not None else set()
+        if id(obj) in seen:
+            return 0
+        seen.add(id(obj))
+        size = _sys.getsizeof(obj)
+        if isinstance(obj, dict):
+            size += sum(deep(k, seen) + deep(v, seen) for k, v in obj.items())
+        elif isinstance(obj, (list, tuple, set)):
+            size += sum(deep(x, seen) for x in obj)
+        return size
+
+    raw = usdc_swap("5" * 88, 1_700_000_000, BONK, 1000, -250)
+    raw["meta"]["logMessages"] = ["Program log: " + "x" * 80 for _ in range(40)]
+    raw["transaction"]["message"]["accountKeys"] = [{"pubkey": "1" * 44} for _ in range(30)]
+    assert deep(normalize(raw, WALLET)) * 3 < deep(raw)
+
+
 def test_an_unbalanced_replay_is_reported_not_raised():
     """Seen live: a sell with no matching acquisition in what the deltas showed.
     The wallet cannot be used, but that is an outcome, not a crash."""

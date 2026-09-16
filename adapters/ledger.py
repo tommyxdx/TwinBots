@@ -24,7 +24,8 @@ from twobots.wallets import new_position, remove
 
 from .helius import PAGE, Helius, TooMuchHistory
 from .prices import SolPrice, quote_pricer
-from .reconstruct import classify, ledger_rows, normalize, quote_usd, token_decimals
+from .reconstruct import (classify, normalize, quote_usd, rows_from_normalized,
+                          token_decimals)
 
 DAY = 86400
 USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -110,7 +111,8 @@ def activity_mix(entries, address):
 
 
 def build(address, helius, sol_price, now=None, quote_marks=True, max_pages=400,
-          min_history_days=30, max_forwarded=0.8, min_closing_sample=20):
+          min_history_days=30, max_forwarded=0.8, min_closing_sample=20,
+          max_transactions=60000):
     """-> (ledger or None, report). None means the wallet cannot be ranked honestly.
 
     Being unusable is an ordinary outcome, not an error, so the report always
@@ -140,28 +142,44 @@ def build(address, helius, sol_price, now=None, quote_marks=True, max_pages=400,
             return None, {"address": address, "rpc_calls": helius.calls, "usable": False,
                           "blocked_by": "history_exceeds_page_budget",
                           "transactions_per_day": round(per_day), "projected": round(projected)}
+    # Normalize as it streams and let each transaction's JSON go: holding the raw
+    # form of a long history is measured in gigabytes and is what the process was
+    # being killed for.
+    normalized, decimals, first, seen = [], {}, None, 0
     try:
-        entries = list(helius.transactions(address, max_pages=max_pages))
+        for entry in helius.transactions(address, max_pages=max_pages):
+            stamp = int(entry["blockTime"])
+            first = stamp if first is None else min(first, stamp)
+            for key in ("preTokenBalances", "postTokenBalances"):
+                for balance in (entry.get("meta") or {}).get(key) or []:
+                    if balance.get("owner") == address:
+                        decimals[balance["mint"]] = int((balance.get("uiTokenAmount") or {})["decimals"])
+            normalized.append(normalize(entry, address))
+            seen += 1
+            if seen > max_transactions:
+                # No single wallet may cost the process its memory: refusing it
+                # is a result, being killed halfway through is not.
+                return None, {"address": address, "rpc_calls": helius.calls, "usable": False,
+                              "blocked_by": "history_exceeds_transaction_budget",
+                              "transactions_seen": seen}
     except TooMuchHistory as exc:
         return None, {"address": address, "rpc_calls": helius.calls, "usable": False,
                       "blocked_by": "history_exceeds_page_budget", "detail": str(exc)}
-    report = {"address": address, "transactions": len(entries), "rpc_calls": helius.calls}
-    if not entries:
+    report = {"address": address, "transactions": seen, "rpc_calls": helius.calls}
+    if not seen:
         return None, {**report, "usable": False, "blocked_by": "no_transactions"}
-    first = min(int(e["blockTime"]) for e in entries)
     report["history_days"] = int((now - first) / DAY)
     if first > now - min_history_days * DAY:
         return None, {**report, "usable": False,
                       "blocked_by": f"history_shorter_than_{min_history_days}_days"}
     sol_price.load(first - 3600, now)
-    rows, rejected = ledger_rows(entries, address, quote_pricer(sol_price))
+    rows, rejected = rows_from_normalized(normalized, quote_pricer(sol_price))
     by_side = reason_counts([{"reason": r["side"]} for r in rows])
     report.update(usable_rows=len(rows), rows_by_side=by_side, unreconstructable=len(rejected),
                   reasons=reason_counts(rejected))
     if rejected:
         return None, {**report, "usable": False, "blocked_by": "unreconstructable_cost_basis",
                       "first_rejection_ts": min(i["ts"] for i in rejected)}
-    decimals = token_decimals(entries, address)
     try:
         held = inventory(rows)
     except (ValueError, KeyError) as exc:

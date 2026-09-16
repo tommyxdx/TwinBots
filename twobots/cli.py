@@ -132,7 +132,8 @@ def refresh_ledgers(cfg,store):
         path = folder/(address+".json")
         try:
             ledger,report = build(address,helius,prices,min_history_days=w["min_history_days"],
-                                  max_pages=w["ledger_max_pages"])
+                                  max_pages=w["ledger_max_pages"],
+                                  max_transactions=w["ledger_max_transactions"])
         except Exception as exc:
             # Keep the message, not just the class: "HTTPError" alone cannot tell
             # a missing price archive from a rejected key.

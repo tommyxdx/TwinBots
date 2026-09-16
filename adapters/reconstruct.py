@@ -9,6 +9,7 @@ rather than guessed at, which is what the ranking requires.
 from __future__ import annotations
 
 from decimal import Decimal
+import sys
 
 SOL_MINT = "So11111111111111111111111111111111111111112"
 LAMPORTS = Decimal(10) ** 9
@@ -48,7 +49,8 @@ def token_deltas(entry, address):
         for balance in meta.get(key) or []:
             if balance.get("owner") != address:
                 continue
-            mint = balance["mint"]
+            # The same few mints repeat across an entire history; one copy each.
+            mint = sys.intern(balance["mint"])
             totals[mint] = totals.get(mint, Decimal(0)) + sign * token_amount(balance)
     return {mint: amount for mint, amount in totals.items() if abs(amount) > DUST}
 
@@ -154,13 +156,22 @@ def classify(row, quote_value):
 
 
 def ledger_rows(entries, address, price_usd):
-    """Normalized ledger rows, plus every transaction that could not be used.
+    """Convenience wrapper: normalize raw transactions, then reduce them."""
+    return rows_from_normalized([normalize(e, address) for e in entries], price_usd)
+
+
+def rows_from_normalized(normalized, price_usd):
+    """Ledger rows from already-normalized transactions, plus what was unusable.
+
+    Taking normalized rows rather than raw ones lets a caller drop each
+    transaction's JSON as it streams: the raw form is around 13 KB and a
+    normalized row a fraction of that, which at a long history is the difference
+    between a gigabyte and a few tens of megabytes.
 
     `price_usd(mint, ts)` returns the USD price of one unit of a quote asset.
     """
     rows, rejected = [], []
-    for row in sorted((normalize(e, address) for e in entries),
-                      key=lambda r: (r["ts"], r["slot"], r["order"])):
+    for row in sorted(normalized, key=lambda r: (r["ts"], r["slot"], r["order"])):
         side, payload = classify(row, quote_usd(row, price_usd))
         if side == "skip":
             continue

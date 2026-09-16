@@ -96,7 +96,7 @@ class SolPrice:
                     # Binance switched open_time from milliseconds to microseconds.
                     while stamp > 1e11:
                         stamp //= 1000
-                    points[stamp] = Decimal(row[4])
+                    points[stamp] = float(row[4])
         return points
 
     def _today(self, end_ts):
@@ -111,7 +111,7 @@ class SolPrice:
             if not rows:
                 break
             for row in rows:
-                points[int(row[0]) // 1000] = Decimal(row[4])
+                points[int(row[0]) // 1000] = float(row[4])
             nxt = int(rows[-1][0]) + 60_000
             if nxt <= cursor:
                 break
@@ -164,7 +164,8 @@ class SolPrice:
         # A long gap means the series does not actually cover this execution.
         if ts - self.times[index] > 3600:
             raise ValueError(f"SOL price gap of {ts - self.times[index]}s at {ts}")
-        return self.closes[index]
+        # Held as float per bar, widened here: one lookup per trade, not per minute.
+        return Decimal(str(self.closes[index]))
 
 
 def quote_pricer(sol_price):
