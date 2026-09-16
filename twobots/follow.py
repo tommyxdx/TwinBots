@@ -15,7 +15,7 @@ from urllib.parse import quote
 
 from .dex import DexPaper, stressed_raw
 from .net import auth_headers
-from .wallets import decimal, timestamp, valid_address
+from .wallets import BLOCKING_FLAGS, decimal, timestamp, valid_address
 
 LOG = logging.getLogger(__name__)
 MAX_FILLS = 500
@@ -165,7 +165,20 @@ class CopyTrader(DexPaper):
             return "ranking is stale"
         ranked = [r for r in report["ranking"] if r["score"] is not None]
         if not ranked:
-            return f"no wallet is ranked yet ({len(report['unavailable'])} candidates unavailable)"
+            examined = report["ranking"]
+            if not examined:
+                return f"no ledger reconstructed yet ({len(report['unavailable'])} candidates waiting)"
+            # Analysed and refused is a different situation from not yet analysed,
+            # and only the first tells you which gate to look at.
+            counts = {}
+            for row in examined:
+                for flag in row["flags"]:
+                    if flag in BLOCKING_FLAGS:
+                        counts[flag] = counts.get(flag, 0) + 1
+            best = max(r["windows"]["90"]["closed_cycles"] for r in examined)
+            detail = ", ".join(f"{k} x{v}" for k, v in sorted(counts.items(), key=lambda kv: -kv[1]))
+            return (f"{len(examined)} analysed, none qualified ({detail}; best had {best} "
+                    f"closed cycles), {len(report['unavailable'])} still without a ledger")
         if not [r for r in ranked if r["score"] >= self.f["min_score"]]:
             return f"best score {max(r['score'] for r in ranked):.1f} is below min_score {self.f['min_score']}"
         return "every ranked wallet carries a flag outside allowed_flags"

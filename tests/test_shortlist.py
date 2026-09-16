@@ -239,6 +239,7 @@ def test_shortlist_addresses_outrank_discovery_for_reconstruction(tmp_path):
     from twobots.storage import Store
     cfg = load_config(ROOT / "config.example.yaml")
     cfg["data_dir"] = str(tmp_path)
+    cfg["wallets"]["ledger_dir"] = str(tmp_path / "ledgers")
     cfg["wallets"]["addresses"] = [C]
     store = Store(tmp_path)
     try:

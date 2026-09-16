@@ -289,9 +289,17 @@ def test_idle_reason_names_the_gate_that_actually_stopped_it(env):
     bot = trader(cfg, store)
     now = time.time()
     assert "not produced a ranking" in bot.idle_reason(now)
+    # Nothing reconstructed at all reads differently from nothing qualifying.
+    rank(cfg, store, ledgers, [])
+    assert "no ledger reconstructed yet" in bot.idle_reason(now)
 
+    # A wallet that was analysed and refused is not the same as one never seen,
+    # and the message has to say which gate stopped it.
     rank(cfg, store, ledgers, [ledger(701, BAGS, BAG_MARKS)])
-    assert "no wallet is ranked yet" in bot.idle_reason(now)
+    reason = bot.idle_reason(now)
+    assert "1 analysed, none qualified" in reason
+    assert "realized_profit_does_not_cover_open_losses" in reason
+    assert "closed cycles" in reason
 
     rank(cfg, store, ledgers, [ledger(700, GOOD)])
     cfg["follow"]["min_score"] = 999

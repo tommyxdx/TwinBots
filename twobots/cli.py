@@ -36,11 +36,18 @@ def candidates(cfg,store):
     because reconstruction is the scarce resource and the order decides what gets
     spent on first.
     """
+    from .wallets import valid_address
+    folder = Path(cfg["wallets"]["ledger_dir"])
+    # A wallet already reconstructed keeps its place: dropping it for a newly
+    # arrived candidate leaves its ledger to rot past max_age_s, and the work
+    # that produced it is then spent again from scratch.
+    built = sorted(x.stem for x in folder.glob("*.json")
+                   if valid_address(x.stem)) if folder.is_dir() else []
     short = store.get("wallet:shortlist",{}).get("addresses",[])
     found = store.get(f"wallet:discovery:{cfg['scanner']['network']}",{}).get("addresses",{})
     discovered = sorted(found,key=lambda a:(-found[a],a))
-    ordered = cfg["wallets"]["addresses"]+short+discovered
-    return list(dict.fromkeys(ordered))[:cfg["wallets"]["max_candidates"]]
+    ordered = cfg["wallets"]["addresses"]+built+short+discovered
+    return list(dict.fromkeys(ordered))[:cfg["wallets"]["max_candidates"]+len(built)]
 
 
 KNOWN_PROVIDER_KEYS = ("DUNE_API_KEY","BIRDEYE_API_KEY","SOLSCAN_API_KEY")
