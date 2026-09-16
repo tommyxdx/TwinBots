@@ -162,8 +162,15 @@ def build(address, helius, sol_price, now=None, quote_marks=True, max_pages=400,
         return None, {**report, "usable": False, "blocked_by": "unreconstructable_cost_basis",
                       "first_rejection_ts": min(i["ts"] for i in rejected)}
     decimals = token_decimals(entries, address)
+    try:
+        held = inventory(rows)
+    except (ValueError, KeyError) as exc:
+        # The replay does not balance: something was acquired outside what the
+        # deltas show. Unusable, but an ordinary outcome rather than an error.
+        return None, {**report, "usable": False, "blocked_by": "inventory_does_not_reconcile",
+                      "detail": str(exc)[:120]}
     marks, unpriced = [], []
-    for token, quantity in sorted(inventory(rows).items()):
+    for token, quantity in sorted(held.items()):
         if quantity < 0:
             return None, {**report, "usable": False, "blocked_by": "negative_inventory",
                           "token": token}

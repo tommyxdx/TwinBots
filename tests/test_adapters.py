@@ -602,6 +602,25 @@ def test_an_ordinary_agent_wallet_now_ranks():
     assert "allocation_estimated" in result["flags"]
 
 
+def test_an_unbalanced_replay_is_reported_not_raised():
+    """Seen live: a sell with no matching acquisition in what the deltas showed.
+    The wallet cannot be used, but that is an outcome, not a crash."""
+    import time
+    from adapters.ledger import build
+    now = time.time()
+    entries = clean_history(now)
+    entries.append(entry("orphan_sell", int(now - 20 * DAY), fee=0,
+                         pre=[balance(9, POPCAT, WALLET, 500 * 10 ** 9, 9),
+                              balance(1, USDC, WALLET, 0)],
+                         post=[balance(9, POPCAT, WALLET, 0, 9),
+                               balance(1, USDC, WALLET, 400_000_000)]))
+    ledger, report = build(WALLET, FakeHelius(entries), FakeSolPrice(), now=now,
+                           quote_marks=False)
+    assert ledger is None
+    assert report["blocked_by"] == "inventory_does_not_reconcile"
+    assert "exceeds known inventory" in report["detail"]
+
+
 def test_build_reports_an_unusable_wallet_instead_of_raising():
     import time
     from adapters.ledger import build

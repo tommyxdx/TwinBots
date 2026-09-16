@@ -37,7 +37,8 @@ def load_config(path="config.yaml"):
     if cfg["scanner"]["kind"] not in ("wallets", "tokens"):
         raise ValueError("scanner.kind must be wallets or tokens")
     defaults = {"source": "chain", "ledger_dir": "wallet_ledgers", "addresses": [],
-                "ledger_build_every_s": 600, "ledger_build_refresh_s": 86400,
+                "ledger_build_every_s": 600, "ledger_build_refresh_s": 14400,
+                "ledger_reject_retry_s": 86400,
                 "ledgers_per_cycle": 25, "ledger_calls_per_cycle": 20,
                 "ledger_max_pages": 400, "ledger_retry_s": 3600,
                 "url_template": "", "api_key_env": "WALLET_DATA_API_KEY",
@@ -66,11 +67,23 @@ def load_config(path="config.yaml"):
                 "max_wallets_per_run", "refresh_s", "max_age_s", "max_ledger_mb", "min_closed_cycles",
                 "min_closed_tokens", "min_history_days", "ledger_build_every_s",
                 "ledger_build_refresh_s", "ledgers_per_cycle", "ledger_max_pages",
-                "ledger_retry_s", "ledger_calls_per_cycle"):
+                "ledger_retry_s", "ledger_calls_per_cycle", "ledger_reject_retry_s"):
         if type(w[key]) is not int or w[key] <= 0:
             raise ValueError(f"wallets.{key} must be a positive integer")
     if not 0 < w["max_censored_cost_fraction"] < 1:
         raise ValueError("wallets.max_censored_cost_fraction must be between 0 and 1")
+    # A ledger carries the time it was built, and the ranking refuses one older
+    # than max_age_s. Rebuilding less often than that leaves every ledger dead
+    # for the difference, which looks exactly like nothing being ranked at all.
+    # The constraint is derived rather than chosen, so it is corrected, loudly.
+    if w["ledger_build_refresh_s"] >= w["max_age_s"]:
+        import logging
+        logging.warning("wallets.ledger_build_refresh_s (%ds) is not below max_age_s (%ds); "
+                        "ledgers would be stale for %dh out of every %dh. Using %ds.",
+                        w["ledger_build_refresh_s"], w["max_age_s"],
+                        (w["ledger_build_refresh_s"] - w["max_age_s"]) // 3600,
+                        w["ledger_build_refresh_s"] // 3600, w["max_age_s"] * 2 // 3)
+        w["ledger_build_refresh_s"] = w["max_age_s"] * 2 // 3
     if w["max_candidates"] > 1000 or len(w["addresses"]) > w["max_candidates"] or w["max_ledger_mb"] > 64:
         raise ValueError("Wallet candidate/ledger limits exceeded")
     w["ledger_dir"] = str((path.parent / w["ledger_dir"]).resolve())

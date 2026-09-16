@@ -168,6 +168,58 @@ def test_an_expensive_backfill_stops_the_cycle_at_its_budget(env, monkeypatch):
     assert result["pending"] == 2
 
 
+def test_a_ledger_is_rebuilt_before_the_ranking_calls_it_stale(tmp_path):
+    """A ledger records when it was built and the ranking refuses one older than
+    max_age_s. Rebuilding less often left every ledger dead for the difference —
+    measured at 18 hours out of 24, which reads as nothing ever being ranked."""
+    raw = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+    raw = raw.replace("  ledger_build_refresh_s: 14400", "  ledger_build_refresh_s: 86400")
+    path = tmp_path / "rots.yaml"
+    path.write_text(raw, encoding="utf-8")
+    w = load_config(path)["wallets"]
+    assert w["ledger_build_refresh_s"] < w["max_age_s"], "corrected rather than left to rot"
+
+
+def test_each_outcome_waits_its_own_interval(env, monkeypatch):
+    """A distributor will not stop being one today; rechecking it hourly only
+    crowds out the usable ledgers that have to stay fresh."""
+    import adapters.helius, adapters.ledger, adapters.prices
+    cfg, store, _ = env
+    cfg["wallets"].update(ledger_build_refresh_s=100, ledger_retry_s=10,
+                          ledger_reject_retry_s=100000, ledger_calls_per_cycle=1000)
+    store.set("wallet:discovery:solana",
+              {"at": time.time(), "addresses": {A: 300, B: 200, C: 100}})
+    now = time.time()
+    store.set("wallet:build", {
+        A: {"at": now - 50, "usable": True},                          # fresh enough
+        B: {"at": now - 50, "usable": False, "error": "RuntimeError: x"},  # retry soon
+        C: {"at": now - 50, "usable": False,
+            "blocked_by": "buys_and_forwards_rather_than_trades"},    # settled
+    })
+
+    class Counting:
+        def __init__(self):
+            self.calls = 0
+
+    seen = []
+    monkeypatch.setattr(adapters.ledger, "build",
+                        lambda address, h, p, **k: (seen.append(address),
+                                                    (None, {"address": address, "usable": False,
+                                                            "blocked_by": "x"}))[1])
+    monkeypatch.setattr(adapters.helius, "Helius", lambda *a, **k: Counting())
+    monkeypatch.setattr(adapters.prices, "SolPrice", lambda *a, **k: object())
+    refresh_ledgers(cfg, store)
+    assert seen == [B], "only the transient error is due at 50 seconds"
+
+
+def test_an_empty_queue_reports_a_cycle_rather_than_raising(env, monkeypatch):
+    """The early return skipped the keys the loop logs, so an idle cycle surfaced
+    as a warning about a missing key."""
+    cfg, store, _ = env
+    result = refresh_ledgers(cfg, store)
+    assert result == {"screened": 0, "built": 0, "blocked": {}, "rpc_calls": 0, "pending": 0}
+
+
 def test_a_fresh_ledger_is_not_rebuilt_until_it_goes_stale(env, monkeypatch):
     cfg, store, _ = env
     store.set("wallet:discovery:solana", {"at": time.time(), "addresses": {A: 100}})

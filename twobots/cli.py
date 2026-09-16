@@ -94,15 +94,24 @@ def refresh_ledgers(cfg,store):
     state = store.get("wallet:build",{})
     now = time.time()
     def stale(address):
-        # A build that errored may have failed on something transient, so it is
-        # retried on a shorter clock than a ledger that actually reconstructed.
+        """Each outcome gets its own clock.
+
+        A usable ledger has to be rebuilt before the ranking calls it stale. An
+        error may have been transient, so it is retried soon. A determination —
+        this address forwards rather than trades — will not change today, and
+        rechecking it hourly only crowds out the ledgers that must stay fresh.
+        """
         last = state.get(address,{})
-        settled = "usable" in last and "error" not in last
-        wait = w["ledger_build_refresh_s"] if settled else w["ledger_retry_s"]
+        if last.get("usable"):
+            wait = w["ledger_build_refresh_s"]
+        elif "error" in last:
+            wait = w["ledger_retry_s"]
+        else:
+            wait = w["ledger_reject_retry_s"]
         return now-last.get("at",0) >= wait
     due = [a for a in candidates(cfg,store) if stale(a)]
     if not due:
-        return {"built":0,"pending":0}
+        return {"screened":0,"built":0,"blocked":{},"rpc_calls":0,"pending":0}
     due.sort(key=lambda a: state.get(a,{}).get("at",0))
     helius,prices = Helius(),SolPrice(Path(cfg["data_dir"])/"downloads")
     built,screened,spent_at_start = 0,0,0

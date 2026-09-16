@@ -66,10 +66,15 @@ wallets:
   source: chain
   ledger_dir: wallet_ledgers
   # How often the builder wakes, and how stale a ledger may get before rebuild.
+  # A ledger records when it was built and the ranking refuses one older than
+  # max_age_s below, so this MUST stay under that or every ledger spends the
+  # difference unusable. Each outcome then gets its own clock: a usable ledger
+  # is kept fresh, an error may have been transient, and a determination such as
+  # "this address forwards rather than trades" will not change today.
   ledger_build_every_s: 600
-  ledger_build_refresh_s: 86400
-  # A build that errored is retried sooner than one that actually reconstructed.
+  ledger_build_refresh_s: 14400
   ledger_retry_s: 3600
+  ledger_reject_retry_s: 86400
   # A cycle stops at whichever comes first. Most candidates are rejected in one
   # or two calls, so the call budget is what actually binds; the wallet count is
   # only a safety net. 20 calls per 10 minutes stays inside a free Helius tier.
