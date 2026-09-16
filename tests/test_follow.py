@@ -322,6 +322,29 @@ def test_flagged_only_ranking_reports_the_flag_gate(env):
     assert "allowed_flags" in bot.idle_reason(time.time())
 
 
+def test_the_platform_fee_is_charged_on_every_leg(env):
+    """Copying through a service costs a share of each entry and exit, and that
+    is the cost that decides whether a thin edge survives. Simulating without it
+    measures a strategy nobody can actually buy."""
+    cfg, store, ledgers, activity = env
+    cfg["follow"]["platform_fee_fraction"] = 0.01
+    rank(cfg, store, ledgers, [ledger(700, GOOD)])
+    leader, token = address(700), address(900)
+    write_activity(activity, leader, [{"id": "in", "ts": time.time() - 5, "side": "buy",
+                                       "token": token, "notional_usd": "250"}])
+    bot = trader(cfg, store)
+    asyncio.run(bot.step())
+    ticket, gas = cfg["follow"]["ticket_usd"], cfg["dex"]["gas_usd_per_tx"]
+    spent = cfg["follow"]["initial_cash"] - bot.ledger.state()["cash"]
+    # Ticket, chain cost, and one per cent of the ticket.
+    assert abs(spent - (ticket + gas + ticket * 0.01)) < 1e-9
+
+    free = trader(cfg, store)
+    free.f = {**cfg["follow"], "platform_fee_fraction": 0.0}
+    assert free.venue_fee("BUY", free.raw_usd(ticket), {}) < bot.venue_fee(
+        "BUY", bot.raw_usd(ticket), {})
+
+
 def test_copy_account_is_separate_from_dex(env):
     cfg, store, ledgers, activity = env
     rank(cfg, store, ledgers, [ledger(700, GOOD)])

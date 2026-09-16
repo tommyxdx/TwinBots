@@ -52,6 +52,7 @@ def load_config(path="config.yaml"):
                 "max_age_s": 21600, "max_ledger_mb": 10, "min_history_days": 30,
                 "min_closed_cycles": 10, "min_closed_tokens": 3,
                 "cycle_dust_fraction": 0.001,
+                "ranking_snapshot_every_s": 86400,
                 "max_censored_cost_fraction": 0.25, "max_unclassified_fraction": 0.5}
     w = cfg["wallets"] = {**defaults, **cfg.get("wallets", {})}
     # chain builds the ledgers itself from on-chain history; local reads files you
@@ -70,7 +71,7 @@ def load_config(path="config.yaml"):
                 "min_closed_tokens", "min_history_days", "ledger_build_every_s",
                 "ledger_build_refresh_s", "ledgers_per_cycle", "ledger_max_pages",
                 "ledger_retry_s", "ledger_calls_per_cycle", "ledger_reject_retry_s",
-                "ledger_max_transactions"):
+                "ledger_max_transactions", "ranking_snapshot_every_s"):
         if type(w[key]) is not int or w[key] <= 0:
             raise ValueError(f"wallets.{key} must be a positive integer")
     if not 0 < w["cycle_dust_fraction"] < 0.1:
@@ -128,6 +129,7 @@ def load_config(path="config.yaml"):
                        "max_leaders": 3, "min_score": 10.0, "allowed_flags": [],
                        "activity_poll_s": 30, "activity_lookback_s": 900, "status_every_s": 300,
                        "ranking_max_age_s": 21600, "max_feed_age_s": 300, "max_signal_age_s": 120,
+                       "platform_fee_fraction": 0.01,
                        "min_leader_notional_usd": 50.0, "seen_memory": 5000, "cooldown_s": 3600,
                        "mirror_exits": True, "max_activity_mb": 4,
                        "initial_cash": 100, "ticket_usd": 2, "max_positions": 3,
@@ -148,6 +150,8 @@ def load_config(path="config.yaml"):
         raise ValueError("follow.allowed_flags must be a subset of " + ", ".join(WALLET_FLAGS))
     if set(f["allowed_flags"]) & set(BLOCKING_FLAGS):
         raise ValueError("follow.allowed_flags cannot re-admit a flag that blocks ranking")
+    if not 0 <= f["platform_fee_fraction"] < 0.1:
+        raise ValueError("follow.platform_fee_fraction must be a small non-negative share")
     if f["initial_cash"] <= 0 or f["ticket_usd"] <= 0 or f["min_leader_notional_usd"] < 0:
         raise ValueError("Invalid follow capital/ticket/notional configuration")
     if not 0 < f["max_drawdown"] < 1 or not 0 < f["stop_fraction"] < 1 or not 0 < f["trail_fraction"] < 1:

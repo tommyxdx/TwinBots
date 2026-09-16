@@ -95,13 +95,17 @@ class DexPaper:
                 raise RuntimeError("Quote source raised StopIteration") from exc
         return await asyncio.to_thread(call)
 
+    def venue_fee(self,side,amount,quote):
+        """What one leg costs here. On the raw DEX path that is chain cost only."""
+        return self.c["gas_usd_per_tx"]+self.c["extra_fee_usd"]
+
     async def swap(self,token,side,amount,reason,prepared=None):
         stable = self.c["quote_token"]
         a,b = (stable,token) if side=="BUY" else (token,stable)
         q = prepared or await self.quote(a,b,amount)
         if time.time()-q["asof"]>self.c["quote_max_age_s"]:
             return {"status":"QUOTE_EXPIRED"}
-        gas = self.c["gas_usd_per_tx"]+self.c["extra_fee_usd"]
+        gas = self.venue_fee(side,amount,q)
         state = self.ledger.state()
         if state["cash"]<gas+(self.usd(amount) if side=="BUY" else 0):
             return {"status":"INSUFFICIENT_CASH_FOR_INPUT_AND_GAS"}
@@ -157,7 +161,7 @@ class DexPaper:
         if available < buy["min_out"]:
             return {"status": "ROUNDTRIP_COST_REJECTED", "reason": "buy_stress_below_minimum"}
         sell = await self.quote(token,self.c["quote_token"],available)
-        total_fee = 2*(self.c["gas_usd_per_tx"]+self.c["extra_fee_usd"])
+        total_fee = self.venue_fee("BUY",amount,buy)+self.venue_fee("SELL",available,sell)
         proceeds = self.usd(stressed_raw(sell["out_amount"], self.c["adverse_output_bps"]))
         roundtrip_cost = (self.usd(amount)-proceeds+total_fee)/self.usd(amount)
         # The buy/sell quotes are sequential, so this is a cost screen, not arbitrage.

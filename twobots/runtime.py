@@ -73,10 +73,12 @@ async def maintenance_loop(cfg,store,fetcher):
             LOG.warning("Maintenance incomplete: %s",exc)
 
 
-async def scanner_loop(scanner,cfg):
+async def scanner_loop(scanner,cfg,after=None):
     while True:
         try:
             await asyncio.to_thread(scanner.run_once)
+            if after is not None:
+                await asyncio.to_thread(after,cfg,scanner.store)
         except Exception as exc:
             LOG.warning("Scanner temporarily unavailable: %s",exc)
             scanner.store.event("scanner_error",{"type":type(exc).__name__})

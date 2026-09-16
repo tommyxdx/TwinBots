@@ -88,6 +88,16 @@ class CopyTrader(DexPaper):
         super().__init__(cfg, store, gateway, {**cfg["dex"], **{k: f[k] for k in POLICY}})
         self.f, self.feed, self.next_status = f, feed, 0.0
 
+    def venue_fee(self, side, amount, quote):
+        """Chain cost plus what a copy-trading service charges on the notional.
+
+        Following through a platform costs a percentage of every entry and every
+        exit, and that is precisely the cost that decides whether a thin edge
+        survives. Simulating without it measures a strategy nobody can buy.
+        """
+        notional = self.usd(amount if side == "BUY" else quote["out_amount"])
+        return super().venue_fee(side, amount, quote) + notional * self.f["platform_fee_fraction"]
+
     def leaders(self, now):
         report = self.store.get("wallet:latest")
         if not report or now - report["generated_at"] > self.f["ranking_max_age_s"]:
@@ -137,7 +147,13 @@ class CopyTrader(DexPaper):
         if available < buy["min_out"]:
             return {"status": "ROUNDTRIP_COST_REJECTED", "reason": "buy_stress_below_minimum"}
         sell = await self.quote(token, self.c["quote_token"], available)
-        total_fee = 2 * (self.c["gas_usd_per_tx"] + self.c["extra_fee_usd"])
+        # The screen exists to refuse an illiquid token, so it measures what the
+        # market costs: spread, impact and chain fees. The platform's percentage
+        # applies to every token alike, and pre-filtering on it would refuse
+        # everything and measure nothing. It is charged on the fill instead,
+        # which is where it decides whether the leader's edge survived.
+        total_fee = (DexPaper.venue_fee(self, "BUY", amount, buy)
+                     + DexPaper.venue_fee(self, "SELL", available, sell))
         proceeds = self.usd(stressed_raw(sell["out_amount"], self.c["adverse_output_bps"]))
         roundtrip = (self.usd(amount) - proceeds + total_fee) / self.usd(amount)
         if roundtrip < 0 or roundtrip > self.c["max_roundtrip_cost_fraction"]:

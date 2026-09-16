@@ -346,3 +346,58 @@ def test_wide_leader_set_without_matching_slots_is_refused(tmp_path):
     path.write_text(raw, encoding="utf-8")
     with pytest.raises(ValueError, match="max_positions"):
         load_config(path)
+
+
+def snapshot_rows(store, ts, rows):
+    with store.transaction() as db:
+        db.executemany("INSERT OR REPLACE INTO rankings VALUES(?,?,?,?,?,?,?,?,?,?)",
+                       [(ts, a, rank, score, 10, roi7, None, None, 0.0, "[]")
+                        for a, rank, score, roi7 in rows])
+
+
+def test_forward_test_separates_the_ranking_from_its_own_history(env):
+    """The 7-day window read a week later covers the period after the ranking,
+    so it is a forward result rather than a restatement of the same history."""
+    import time
+    from twobots.cli import forward_test
+    cfg, store, _ = env
+    now = time.time()
+    wallets = [A, B, C, "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+               "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
+               "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr"]
+    # Ranked best to worst a week ago; the top half then did better.
+    snapshot_rows(store, now - 8 * 86400,
+                  [(a, i + 1, 50 - i * 5, None) for i, a in enumerate(wallets)])
+    snapshot_rows(store, now,
+                  [(a, i + 1, 50 - i * 5, 0.30 if i < 3 else -0.10)
+                   for i, a in enumerate(wallets)])
+    result = forward_test(store)
+    assert result["pairs"] == 1
+    pair = result["results"][0]
+    assert pair["wallets"] == 6
+    assert pair["top_half_mean_roi7"] == 0.30
+    assert pair["bottom_half_mean_roi7"] == -0.10
+    assert pair["separation"] == 0.40
+
+
+def test_forward_test_says_so_when_there_is_nothing_to_compare(env):
+    from twobots.cli import forward_test
+    cfg, store, _ = env
+    assert forward_test(store)["pairs"] == 0
+    assert "two snapshots" in forward_test(store)["note"]
+
+
+def test_a_ranking_is_snapshotted_once_per_interval(env):
+    import time
+    from twobots.cli import snapshot_ranking
+    cfg, store, _ = env
+    cfg["wallets"]["ranking_snapshot_every_s"] = 86400
+    store.set("wallet:latest", {"generated_at": time.time(), "ranking": [{
+        "address": A, "rank": 1, "score": 12.5, "censored_cost_fraction": 0.0, "flags": [],
+        "windows": {"7": {"cost_roi": 0.1}, "30": {"cost_roi": 0.2},
+                    "90": {"cost_roi": 0.3, "closed_cycles": 11}}}]})
+    assert snapshot_ranking(cfg, store)["snapshot"] is True
+    # A ranking that was overwritten cannot be compared against later, but one
+    # snapshot per scan would be noise rather than history.
+    assert snapshot_ranking(cfg, store)["snapshot"] is False
+    assert store.rows("SELECT count(*) AS n FROM rankings")[0]["n"] == 1

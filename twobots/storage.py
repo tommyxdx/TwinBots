@@ -37,6 +37,11 @@ class Store:
         CREATE TABLE IF NOT EXISTS outbox(id INTEGER PRIMARY KEY,dedupe TEXT UNIQUE,ts REAL,
           message TEXT,status TEXT DEFAULT 'pending',attempts INTEGER DEFAULT 0);
         CREATE TABLE IF NOT EXISTS requests(day TEXT PRIMARY KEY,n INTEGER NOT NULL);
+        -- Ranking history. Forward performance cannot be measured against a
+        -- ranking that was overwritten, and it cannot be backfilled later.
+        CREATE TABLE IF NOT EXISTS rankings(ts REAL,address TEXT,rank INTEGER,score REAL,
+          cycles INTEGER,roi7 REAL,roi30 REAL,roi90 REAL,censored REAL,flags TEXT,
+          PRIMARY KEY(ts,address));
         """)
         self.db.commit()
 

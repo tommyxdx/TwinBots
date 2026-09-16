@@ -114,6 +114,9 @@ wallets:
   # leave dust and a proportional split of mixed-origin inventory leaves a
   # rounding residue; requiring exactly zero never closed either.
   cycle_dust_fraction: 0.001
+  # A ranking that was overwritten cannot be compared against what those wallets
+  # did next, and it cannot be backfilled. Snapshots are the forward test.
+  ranking_snapshot_every_s: 86400
   # Inventory transferred out is an outcome nobody can observe. Above this share
   # of deployed cost the record no longer shows what the wallet actually did.
   max_censored_cost_fraction: 0.25
@@ -189,6 +192,10 @@ follow:
   # Feed staleness, then per-fill copy lag. A fill older than this is never entered.
   max_feed_age_s: 300
   max_signal_age_s: 120
+  # What a copy-trading service charges per leg. Following is not free, and two
+  # legs at one per cent is a floor under every trade: a leader whose average
+  # round trip nets less than that is unfollowable through a platform at all.
+  platform_fee_fraction: 0.01
   min_leader_notional_usd: 50
   seen_memory: 5000
   cooldown_s: 3600
