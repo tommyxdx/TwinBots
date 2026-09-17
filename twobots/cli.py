@@ -115,7 +115,14 @@ def refresh_ledgers(cfg,store):
     due = [a for a in candidates(cfg,store) if stale(a)]
     if not due:
         return {"screened":0,"built":0,"blocked":{},"rpc_calls":0,"pending":0}
-    due.sort(key=lambda a: state.get(a,{}).get("at",0))
+    # Refreshes first, screening with what is left. A usable ledger that goes
+    # stale costs the ranking a wallet already paid for in full; an unscreened
+    # candidate is speculative and three out of four turn out to be
+    # distributors. Sorted purely by last attempt, an unscreened address scores
+    # zero and sorts ahead of every ledger the ranking depends on, so a large
+    # candidate pool starves the ranking empty exactly when discovery is
+    # working best.
+    due.sort(key=lambda a: (not state.get(a,{}).get("usable"),state.get(a,{}).get("at",0)))
     helius,prices = Helius(),SolPrice(Path(cfg["data_dir"])/"downloads")
     ceiling = w["ledger_memory_ceiling_mb"] or auto_ceiling()
     built,screened,spent_at_start = 0,0,0

@@ -96,6 +96,28 @@ def test_a_wallet_that_stops_qualifying_loses_its_stale_ledger(env, monkeypatch)
     assert not (folder / (A + ".json")).exists(), "stale ledger must not keep ranking"
 
 
+def test_a_growing_candidate_pool_does_not_starve_the_ranking(env, monkeypatch):
+    """Screening used to take the whole budget and leave the ranking empty.
+
+    An unscreened address has no last-attempt time, so ordering purely by that
+    put every candidate ahead of the ledgers the ranking runs on. On the live
+    box this emptied the ranking exactly as discovery started working: 254
+    candidates, 20 calls a cycle all spent screening, five usable ledgers left
+    to age past `max_age_s` and be rejected as stale.
+    """
+    cfg, store, _ = env
+    cfg["wallets"]["ledgers_per_cycle"] = 2
+    # A has a usable ledger already and is due a refresh; the rest are unseen.
+    store.set("wallet:discovery:solana",
+              {"at": time.time(), "addresses": {A: 100, B: 200, C: 300}})
+    store.set("wallet:build", {A: {"at": 0, "usable": True}})
+    seen = []
+    stub_builder({a: (ledger_for(a), {"address": a, "usable": True}) for a in (A, B, C)},
+                 monkeypatch, seen)
+    refresh_ledgers(cfg, store)
+    assert A in seen, "the ledger the ranking depends on is refreshed before new candidates"
+
+
 def test_rebuilds_are_bounded_and_rotate_oldest_first(env, monkeypatch):
     cfg, store, _ = env
     store.set("wallet:discovery:solana", {"at": time.time(), "addresses": {A: 300, B: 200, C: 100}})
