@@ -190,6 +190,29 @@ class WalletAccounting(unittest.TestCase):
         self.assertEqual(one["closed_cycles"], two["closed_cycles"])
         self.assertEqual(analyze(swapped)["censored_cost_fraction"], 0)
 
+    def test_a_swap_leaves_the_provenance_string_intact(self):
+        """`source` was the provenance string and also the name rebound to the
+        outgoing position inside the swap branch, so any wallet that ever
+        swapped returned a position dict full of Decimals in its place. Writing
+        the report then raised "Object of type Decimal is not JSON
+        serializable", which killed the entire scanner cycle -- the ranking
+        froze for five hours behind one shadowed local."""
+        data = ledger(now=NOW)
+        a, b = address(910), address(911)
+        data["transactions"] += [
+            {"id": "buy", "ts": NOW-5000, "side": "buy", "token": a,
+             "quantity": "10", "notional_usd": "500", "fee_usd": "0"},
+            {"id": "swap", "ts": NOW-3000, "side": "swap", "token_out": a, "quantity_out": "10",
+             "token_in": b, "quantity_in": "4", "fee_usd": "0"},
+            {"id": "out", "ts": NOW-100, "side": "sell", "token": b,
+             "quantity": "4", "notional_usd": "900", "fee_usd": "0"}]
+        result = analyze(data)
+        self.assertEqual(result["source"], data["source"])
+        self.assertIsInstance(result["source"], str)
+        # The whole analysis has to survive the write, not just that one field.
+        json.dumps(result, allow_nan=False)
+        json.dumps(rank_wallets([result], 1, 1), allow_nan=False)
+
     def test_transfer_out_censors_the_cycle_instead_of_scoring_it(self):
         data = ledger(now=NOW)
         token = address(902)

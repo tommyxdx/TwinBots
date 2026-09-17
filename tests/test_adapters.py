@@ -457,6 +457,47 @@ def test_conversion_releases_each_transaction_as_it_reads_it():
     assert normalized == [None] * 5, "the input is consumed, not merely read"
 
 
+def test_an_unsupported_transaction_version_raises_the_ceiling_and_retries():
+    """The chain gained v1 transactions and the adapter still declared 0, so the
+    RPC refused whole pages and the wallet was lost with the reason buried in an
+    hourly log line. Reconstruction is from balance deltas and never parses
+    instructions, so the ceiling is a formality the endpoint imposes."""
+    import json
+    from adapters.helius import Helius
+    client = Helius.__new__(Helius)
+    client.endpoint, client.timeout, client.api_key = "https://rpc.example", 1, "k"
+    client.min_interval_s, client.max_retries, client.max_bytes = 0, 3, 1 << 20
+    client.last, client.calls, client.max_tx_version = 0.0, 0, 0
+    sent = []
+
+    class Response:
+        def __init__(self, payload): self.payload = payload
+        def read(self, n): return json.dumps(self.payload).encode()
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def open_(request, timeout=None):
+        body = json.loads(request.data)
+        sent.append(body["params"][0]["maxSupportedTransactionVersion"])
+        if sent[-1] < 1:
+            return Response({"error": {"message": "Transaction version (1) is not supported "
+                                                  "by the requesting client."}})
+        return Response({"result": {"data": [], "paginationToken": None}})
+
+    client.opener = type("O", (), {"open": staticmethod(open_)})()
+    result = client.rpc("getTransactionsForAddress", [{"maxSupportedTransactionVersion": 0}])
+    assert result == {"data": [], "paginationToken": None}
+    assert sent == [0, 1], "it asks again with the version the endpoint named"
+    assert client.max_tx_version == 1, "and remembers it for every later call"
+
+
+def test_an_unrelated_rpc_error_is_not_retried_as_a_version_problem():
+    from adapters.helius import unsupported_version
+    assert unsupported_version("Transaction version (2) is not supported") == 2
+    assert unsupported_version("rate limit exceeded") is None
+    assert unsupported_version(None) is None
+
+
 def test_a_sample_stops_at_the_page_cap_without_calling_it_a_failure():
     """Any active wallet has more than one page, and the shape sample only wants
     one. Treating 'there is more' as an error rejected every real trader at the

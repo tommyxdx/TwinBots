@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -16,6 +17,17 @@ ENDPOINT = "https://mainnet.helius-rpc.com"
 # inside the response cap while still cutting round trips on busy wallets.
 PAGE = 500
 RETRY_CODES = (429, 500, 502, 503, 504)
+# The chain gains transaction versions over time and the RPC refuses any it
+# believes the client cannot read. Reconstruction here is done from balance
+# deltas and never parses instructions, so every version is equally readable:
+# the ceiling exists only to satisfy the endpoint.
+UNSUPPORTED_VERSION = re.compile(r"[Tt]ransaction version \((\d+)\) is not supported")
+
+
+def unsupported_version(message):
+    """The version an RPC refusal is asking for, or None if that is not the complaint."""
+    found = UNSUPPORTED_VERSION.search(message or "")
+    return int(found.group(1)) if found else None
 
 
 class TooMuchHistory(RuntimeError):
@@ -28,6 +40,11 @@ class RejectRedirects(urllib.request.HTTPRedirectHandler):
 
 
 class Helius:
+    # A class attribute as well as an instance one: the ceiling has a meaningful
+    # default before __init__ runs, so a partially constructed client still
+    # builds a valid request rather than failing on a missing attribute.
+    max_tx_version = 0
+
     def __init__(self, api_key=None, endpoint=ENDPOINT, timeout=60, min_interval_s=0.15,
                  max_retries=3, max_bytes=64 * 1024 * 1024):
         self.api_key = api_key or os.getenv("HELIUS_API_KEY", "")
@@ -37,10 +54,12 @@ class Helius:
         self.min_interval_s, self.max_retries, self.max_bytes = min_interval_s, max_retries, max_bytes
         self.opener = urllib.request.build_opener(RejectRedirects())
         self.last, self.calls = 0.0, 0
+        self.max_tx_version = 0
 
     def rpc(self, method, params):
-        body = json.dumps({"jsonrpc": "2.0", "id": "adapter", "method": method,
-                           "params": params}).encode()
+        encode = lambda: json.dumps({"jsonrpc": "2.0", "id": "adapter", "method": method,
+                                     "params": params}).encode()
+        body = encode()
         # The key travels in the query string as Helius requires, so it must never
         # reach a log or an exception message.
         url = f"{self.endpoint}/?api-key={self.api_key}"
@@ -60,7 +79,20 @@ class Helius:
                 self.calls += 1
                 payload = json.loads(raw)
                 if "error" in payload:
-                    raise RuntimeError(f"{method} failed: {payload['error'].get('message', 'unknown')}")
+                    message = payload["error"].get("message", "unknown")
+                    # Raise the declared ceiling to whatever the endpoint asked
+                    # for and try again. Failing instead loses the wallet and
+                    # waits for someone to notice that a constant needs bumping
+                    # -- which is one build failure buried in an hourly log.
+                    wanted = unsupported_version(message)
+                    if wanted is not None and wanted > self.max_tx_version and attempt < self.max_retries:
+                        self.max_tx_version = wanted
+                        for item in params:
+                            if isinstance(item, dict) and "maxSupportedTransactionVersion" in item:
+                                item["maxSupportedTransactionVersion"] = wanted
+                        body = encode()
+                        continue
+                    raise RuntimeError(f"{method} failed: {message}")
                 return payload["result"]
             except urllib.error.HTTPError as exc:
                 if exc.code not in RETRY_CODES or attempt == self.max_retries:
@@ -85,7 +117,7 @@ class Helius:
         first and a failure for the second.
         """
         options = {"transactionDetails": "full", "encoding": "jsonParsed",
-                   "commitment": "finalized", "maxSupportedTransactionVersion": 0,
+                   "commitment": "finalized", "maxSupportedTransactionVersion": self.max_tx_version,
                    "sortOrder": sort_order, "limit": limit,
                    "filters": {"tokenAccounts": "balanceChanged", "status": "any"}}
         block_time = {}
@@ -117,6 +149,7 @@ class Helius:
         history is checked first.
         """
         options = {"transactionDetails": "signatures", "commitment": "finalized",
+                   "maxSupportedTransactionVersion": self.max_tx_version,
                    "sortOrder": "desc", "limit": limit,
                    "filters": {"tokenAccounts": "balanceChanged", "status": "any"}}
         seen, oldest, token = 0, None, None

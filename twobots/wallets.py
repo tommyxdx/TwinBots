@@ -230,24 +230,29 @@ def analyze_ledger(data, address, network="solana", now=None, max_age_s=21600,
             in_qty = decimal(row.get("quantity_in"), "quantity_in")
             if out_qty <= 0 or in_qty <= 0 or out_token == in_token:
                 raise ValueError("Swap requires two distinct tokens and positive quantities")
-            source = positions.get(out_token)
-            if source is None:
+            # Named `outgoing`, not `source`: `source` is the provenance string
+            # this function returns, and rebinding it here handed every wallet
+            # that ever swapped a position dict full of Decimals in its place.
+            # The report's JSON write then failed, which killed the whole
+            # scanner cycle and froze the ranking rather than losing one field.
+            outgoing = positions.get(out_token)
+            if outgoing is None:
                 raise ValueError("Swap exceeds known inventory; missing purchases or transfers")
             activity.append((ts, in_token))
-            traded, cost, external = remove(source, out_qty, "Swap")
+            traded, cost, external = remove(outgoing, out_qty, "Swap")
             # Basis carries across instead of realising at a price neither leg
             # supplies. Total profit stays exact; only the cycle count drops.
             share = traded / out_qty if out_qty > 0 else Decimal(0)
-            carried_pnl, carried_sold = source["pnl"], source["sold_cost"]
-            opened, source_funded = source["opened"], source["funded"]
-            source["pnl"], source["sold_cost"] = Decimal(0), Decimal(0)
-            if source["traded_qty"] <= 0 and source["external_qty"] <= 0:
+            carried_pnl, carried_sold = outgoing["pnl"], outgoing["sold_cost"]
+            opened, outgoing_funded = outgoing["opened"], outgoing["funded"]
+            outgoing["pnl"], outgoing["sold_cost"] = Decimal(0), Decimal(0)
+            if outgoing["traded_qty"] <= 0 and outgoing["external_qty"] <= 0:
                 del positions[out_token]
             target = positions.setdefault(in_token, new_position(opened))
             target["traded_qty"] += in_qty * share
             target["traded_cost"] += cost + fee
             target["peak_qty"] = max(target["peak_qty"], target["traded_qty"])
-            target["funded"] = target["funded"] or source_funded
+            target["funded"] = target["funded"] or outgoing_funded
             target["external_qty"] += in_qty * (Decimal(1) - share)
             target["pnl"] += carried_pnl
             target["sold_cost"] += carried_sold
