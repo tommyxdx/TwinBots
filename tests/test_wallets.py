@@ -435,6 +435,32 @@ class WalletWorkflow(unittest.TestCase):
             self.put(data)
             self.assertFalse(scanner.run_once()["ranking"])
 
+    def test_a_stale_cached_ledger_is_re_read_before_new_candidates(self):
+        """How the live box ran for hours with a full candidate list and an empty
+        ranking. A ledger is read once and cached; when it ages past `max_age_s`
+        the cached copy is rejected and only a re-read from disk can recover it.
+        Two addresses are read per run, ordered by last attempt -- and a
+        never-seen candidate has no last attempt, so every discovered address
+        sorted ahead of the one ledger that had already been read. The refresh
+        never came, and the ranking stayed empty however fresh the file was.
+        """
+        self.put(ledger(now=NOW))
+        self.cfg["wallets"]["max_wallets_per_run"] = 2
+        scanner = WalletScanner(self.cfg, self.store, NoNetwork(), NoNetwork())
+        with patch("time.time", return_value=NOW):
+            self.assertTrue(scanner.run_once()["ranking"], "read and cached")
+
+        # Well past max_age_s: the cached copy is now too old to analyze, and a
+        # crowd of candidates nobody has looked at arrives in the meantime.
+        later = NOW + self.cfg["wallets"]["max_age_s"] + 3600
+        self.store.set("wallet:discovery:solana",
+                       {"at": later, "addresses": {address(600 + i): later for i in range(24)}})
+        self.put(ledger(now=later))          # the builder has refreshed the file
+        with patch("time.time", return_value=later):
+            result = scanner.run_once()
+        self.assertTrue(result["ranking"],
+                        "the refreshed file on disk must be re-read before new candidates")
+
     def test_wallet_refresh_rotates_and_is_bounded(self):
         self.cfg["wallets"].update(source="adapter", url_template="https://adapter.example/{address}",
                                    addresses=[address(500), address(501)], max_wallets_per_run=1)

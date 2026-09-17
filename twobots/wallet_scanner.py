@@ -110,7 +110,15 @@ class WalletScanner:
         # ledgers are picked up on the next cycle instead of on a timer.
         if self.c["source"] in ("chain", "local"):
             due = list(addresses)
-        due.sort(key=lambda a: (states[a].get("attempted_at", 0), a))
+        # Addresses whose ledger is already on disk come first: they are the
+        # only ones that can produce a ranking at all, reading them costs no
+        # API call, and they are exactly what a never-seen candidate displaces
+        # when the order is last-attempt alone -- an address nobody has looked
+        # at has no last attempt, so it sorts ahead of every input the ranking
+        # runs on. A growing candidate pool then pushes the ranking's own
+        # ledgers out of the run and empties it.
+        have = set(local)
+        due.sort(key=lambda a: (a not in have, states[a].get("attempted_at", 0), a))
         for address in due[:self.c["max_wallets_per_run"]]:
             state = {"attempted_at": now}
             try:
