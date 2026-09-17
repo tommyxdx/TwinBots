@@ -41,7 +41,7 @@ def load_config(path="config.yaml"):
                 "ledger_reject_retry_s": 86400,
                 "ledgers_per_cycle": 25, "ledger_calls_per_cycle": 20,
                 "ledger_max_pages": 400, "ledger_retry_s": 3600,
-                "ledger_max_transactions": 60000,
+                "ledger_max_transactions": 60000, "ledger_memory_ceiling_mb": 0,
                 "url_template": "", "api_key_env": "WALLET_DATA_API_KEY",
                 "header": "Authorization", "header_prefix": "Bearer ",
                 "discover_enabled": True, "discovery_every_s": 21600,
@@ -74,6 +74,9 @@ def load_config(path="config.yaml"):
                 "ledger_max_transactions", "ranking_snapshot_every_s"):
         if type(w[key]) is not int or w[key] <= 0:
             raise ValueError(f"wallets.{key} must be a positive integer")
+    # Zero means derive it from the machine, which is what a small box wants.
+    if type(w["ledger_memory_ceiling_mb"]) is not int or w["ledger_memory_ceiling_mb"] < 0:
+        raise ValueError("wallets.ledger_memory_ceiling_mb must be 0 (automatic) or a positive integer")
     if not 0 < w["cycle_dust_fraction"] < 0.1:
         raise ValueError("wallets.cycle_dust_fraction must be a small positive share")
     if not 0 < w["max_censored_cost_fraction"] < 1:

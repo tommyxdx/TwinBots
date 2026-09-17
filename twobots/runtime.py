@@ -3,7 +3,6 @@ import asyncio
 import logging
 import os
 import time
-from .models import train_cex,train_scanner
 
 LOG = logging.getLogger(__name__)
 
@@ -46,6 +45,9 @@ def maintain(cfg,store,fetcher,bootstrap=False):
             fetcher.follow_cohort()
         last = store.get("models:last_attempt",0)
         if time.time()-last>86400:
+            # Imported here, not at module scope: pulling in the science stack
+            # costs ~110 MB resident and a wallet-only run never trains.
+            from .models import train_cex,train_scanner
             if cfg["cex"]["enabled"] or not wallet_mode:
                 train_cex(cfg,store)
             if not wallet_mode:

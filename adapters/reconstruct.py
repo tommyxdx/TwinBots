@@ -170,9 +170,16 @@ def rows_from_normalized(normalized, price_usd):
     between a gigabyte and a few tens of megabytes.
 
     `price_usd(mint, ts)` returns the USD price of one unit of a quote asset.
+
+    Consumes `normalized`: it is sorted in place and emptied as it is read, so
+    the output list grows while the input shrinks instead of both sitting in
+    memory at once. At sixty thousand transactions that is the difference
+    between one peak and two on a machine that has no swap to absorb either.
     """
     rows, rejected, skipped = [], [], 0
-    for row in sorted(normalized, key=lambda r: (r["ts"], r["slot"], r["order"])):
+    normalized.sort(key=lambda r: (r["ts"], r["slot"], r["order"]))
+    for index, row in enumerate(normalized):
+        normalized[index] = None
         side, payload = classify(row, quote_usd(row, price_usd))
         if side == "skip":
             # Nothing the wallet holds as a research asset moved. Ordinary cash

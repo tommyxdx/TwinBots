@@ -336,7 +336,7 @@ def test_price_loader_never_asks_for_an_unpublished_archive(tmp_path, monkeypatc
     today = datetime.fromtimestamp(now, timezone.utc).date()
     prices, asked = SolPrice(tmp_path), []
 
-    def archive(kind, key):
+    def archive(kind, key, interval=None):
         asked.append((kind, key))
         return {int(now - 5 * DAY): Decimal("100")}
 
@@ -359,7 +359,7 @@ def test_a_missing_archive_is_a_hole_not_a_crash(tmp_path, monkeypatch):
     import time
     now = time.time()
     prices = SolPrice(tmp_path)
-    monkeypatch.setattr(prices, "_archive", lambda kind, key: None)
+    monkeypatch.setattr(prices, "_archive", lambda kind, key, interval=None: None)
     monkeypatch.setattr(prices, "_today", lambda end: {int(now - 30): Decimal("101")})
     prices.load(now - 70 * DAY, now)
     assert prices.missing, "the absent spans are reported"
@@ -367,6 +367,94 @@ def test_a_missing_archive_is_a_hole_not_a_crash(tmp_path, monkeypatch):
     # But a transaction inside the hole is refused rather than priced off a stale bar.
     with pytest.raises(ValueError, match="gap|at or before"):
         prices.at(int(now - 60 * DAY))
+
+
+def test_old_history_is_priced_hourly_so_the_series_fits_in_memory(tmp_path, monkeypatch):
+    """A three-year minute series is ~1.6M bars, and loading transiently holds the
+    old arrays, the merge dict and the new arrays at once. That peak was killing
+    the process on a 913 MB box with no swap. Cost basis carried in from years
+    back does not need minute resolution; the scoring window still gets it."""
+    import time
+    from datetime import datetime, timezone
+    from adapters.prices import SolPrice
+    now = time.time()
+    prices, asked = SolPrice(tmp_path, fine_days=120), []
+
+    def archive(kind, key, interval=None):
+        asked.append((kind, key, interval))
+        return {int(now - 400 * DAY): 100.0}
+
+    monkeypatch.setattr(prices, "_archive", archive)
+    monkeypatch.setattr(prices, "_today", lambda end: {int(now - 30): 101.0})
+    prices.load(now - 400 * DAY, now)
+
+    months = {key: interval for kind, key, interval in asked if kind == "monthly"}
+    old = datetime.fromtimestamp(now - 300 * DAY, timezone.utc).strftime("%Y-%m")
+    recent = datetime.fromtimestamp(now - 40 * DAY, timezone.utc).strftime("%Y-%m")
+    assert months[old] == "1h", "history well outside the window is coarse"
+    assert months[recent] == "1m", "the scoring window keeps minute resolution"
+    # Every daily file belongs to the running month, which is always fine-grained.
+    assert all(interval in (None, "1m") for kind, _, interval in asked if kind == "daily")
+
+
+def test_an_hourly_bar_still_prices_a_transaction_beside_it():
+    """`at` refuses a stale bar, and the threshold has to admit the coarse tier:
+    hourly closes sit an hour apart by construction, so the old one-hour limit
+    would have rejected most of the history it was meant to price."""
+    from adapters.prices import SolPrice
+    prices = SolPrice.__new__(SolPrice)
+    prices.times, prices.closes = [1_000_000, 1_003_600], [100.0, 110.0]
+    assert prices.at(1_003_500) == Decimal("100")   # 3,500s past an hourly bar
+    assert prices.at(1_003_600) == Decimal("110")
+    with pytest.raises(ValueError, match="gap"):
+        prices.at(1_003_600 + 7_201)                # a real hole, not resolution
+
+
+def test_a_wallet_too_big_for_the_box_is_refused_not_fatal(monkeypatch):
+    """Twice now the kernel has killed the process mid-cycle on a 913 MB box with
+    no swap, losing every wallet in flight and leaving no record of why. Refusing
+    one oversized wallet is an outcome the report can show."""
+    from adapters import ledger as ledger_module
+    from adapters.helius import Helius
+    client = Helius.__new__(Helius)
+    client.calls = 0
+    entry = {"blockTime": 1_700_000_000, "slot": 1, "signature": "s" * 88,
+             "meta": {"fee": 5000, "preBalances": [10 ** 9], "postBalances": [10 ** 9],
+                      "preTokenBalances": [], "postTokenBalances": []},
+             "transaction": {"message": {"accountKeys": ["addr"]}, "signatures": ["s" * 88]}}
+    client.transactions = lambda address, **kw: iter([entry] * 5000)
+    client.history_size = lambda address, **kw: {"complete": True, "transactions": 5000,
+                                                "oldest": 1_600_000_000}
+    class Prices:
+        def load(self, start, end):
+            return 0
+
+        def at(self, ts):
+            return Decimal("100")
+
+    # Over budget from the first check onwards.
+    monkeypatch.setattr(ledger_module, "resident_mb", lambda: 900.0)
+    built, report = ledger_module.build("addr", client, Prices(), memory_ceiling_mb=640)
+    assert built is None
+    assert report["blocked_by"] == "memory_ceiling"
+    assert report["resident_mb"] == 900 and report["ceiling_mb"] == 640
+    assert report["transactions_seen"] == 2048, "it stops at the check, not at the end"
+    # Unset, the guard costs nothing and never fires however high memory goes.
+    _, open_report = ledger_module.build("addr", client, Prices(), memory_ceiling_mb=0)
+    assert open_report.get("blocked_by") != "memory_ceiling"
+
+
+def test_conversion_releases_each_transaction_as_it_reads_it():
+    """The normalized list and the row list used to be alive at the same time,
+    doubling the peak exactly where the process had least room."""
+    from adapters.reconstruct import rows_from_normalized, SOL_MINT
+    normalized = [{"ts": 1_700_000_000 + i, "slot": i, "order": 0, "signature": f"sig{i}",
+                   "failed": False, "fee_sol": Decimal("0.000005"),
+                   "quote_legs": {SOL_MINT: Decimal("-10")},
+                   "tokens": {"MintAAA": Decimal("100")}} for i in range(5)]
+    rows, rejected, skipped = rows_from_normalized(normalized, lambda mint, ts: Decimal("100"))
+    assert len(rows) == 5 and not rejected and not skipped
+    assert normalized == [None] * 5, "the input is consumed, not merely read"
 
 
 def test_a_sample_stops_at_the_page_cap_without_calling_it_a_failure():

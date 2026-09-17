@@ -14,15 +14,11 @@ from .storage import Store
 from .net import HTTP
 from .data import Fetcher
 from .notify import Telegram
-from .scanner import Scanner
 from .wallet_scanner import WalletScanner
-from .models import train_cex,train_scanner
 from .runtime import ProcessLock,maintain,maintenance_loop,scanner_loop
-from .cex import CexPaper
 from .dex import DexPaper,QuoteGateway
 from .follow import ActivityFeed,CopyTrader
 from .report import export_report,forward_test
-from .demo import run_demo
 
 
 def output(data):
@@ -93,7 +89,7 @@ def refresh_ledgers(cfg,store):
     rejection mix without anyone running a separate diagnostic pass.
     """
     from adapters.helius import Helius
-    from adapters.ledger import build
+    from adapters.ledger import auto_ceiling, build
     from adapters.prices import SolPrice
     w = cfg["wallets"]
     folder = Path(w["ledger_dir"])
@@ -121,6 +117,7 @@ def refresh_ledgers(cfg,store):
         return {"screened":0,"built":0,"blocked":{},"rpc_calls":0,"pending":0}
     due.sort(key=lambda a: state.get(a,{}).get("at",0))
     helius,prices = Helius(),SolPrice(Path(cfg["data_dir"])/"downloads")
+    ceiling = w["ledger_memory_ceiling_mb"] or auto_ceiling()
     built,screened,spent_at_start = 0,0,0
     blocked = {}
     for address in due[:w["ledgers_per_cycle"]]:
@@ -133,7 +130,8 @@ def refresh_ledgers(cfg,store):
         try:
             ledger,report = build(address,helius,prices,min_history_days=w["min_history_days"],
                                   max_pages=w["ledger_max_pages"],
-                                  max_transactions=w["ledger_max_transactions"])
+                                  max_transactions=w["ledger_max_transactions"],
+                                  memory_ceiling_mb=ceiling)
         except Exception as exc:
             # Keep the message, not just the class: "HTTPError" alone cannot tell
             # a missing price archive from a rejected key.
@@ -359,7 +357,12 @@ async def supervise(tasks,engines,cfg,store,close_positions,grace_s=10):
 
 async def services(args,cfg,store,http,fetcher):
     wallet_mode = cfg["scanner"]["kind"] == "wallets"
-    scanner = (WalletScanner if wallet_mode else Scanner)(cfg,store,http,fetcher,Telegram(cfg,store,http))
+    if wallet_mode:
+        build = WalletScanner
+    else:
+        from .scanner import Scanner
+        build = Scanner
+    scanner = build(cfg,store,http,fetcher,Telegram(cfg,store,http))
     with ExitStack() as stack:
         use_scan = args.command in ("run","scan")
         venues = []
@@ -396,6 +399,7 @@ async def services(args,cfg,store,http,fetcher):
             tasks.append(asyncio.create_task(report_loop(cfg,store)))
         engines = []
         if "cex" in venues:
+            from .cex import CexPaper
             engines.append(CexPaper(cfg,store,http,fetcher))
         if "dex" in venues:
             engines.append(DexPaper(cfg,store,QuoteGateway(cfg,http)))
@@ -419,6 +423,7 @@ def main(argv=None):
         path = str(Path(__file__).resolve().parent.parent/"config.example.yaml")
     cfg = load_config(path)
     if args.command=="demo":
+        from .demo import run_demo
         output(run_demo(cfg,args.output))
         return 0
     store = Store(cfg["data_dir"])
@@ -448,6 +453,7 @@ def main(argv=None):
                 output({"scanner":"Wallet ranking is deterministic and needs no model training"})
                 return 0
             targets = ("cex",) if cfg["scanner"]["kind"] == "wallets" else ("cex","scanner")
+            from .models import train_cex,train_scanner
             with ProcessLock(store.root,"maintenance"):
                 output({k:(train_cex if k=="cex" else train_scanner)(cfg,store)
                         for k in (targets if args.target=="all" else (args.target,))})

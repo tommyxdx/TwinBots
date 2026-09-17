@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from decimal import Decimal
 from pathlib import Path
 import sys
@@ -110,9 +111,42 @@ def activity_mix(entries, address):
     return counts
 
 
+def resident_mb():
+    """This process's resident memory, or None where it cannot be read cheaply.
+
+    Deliberately free of dependencies: the box this runs on is small enough that
+    the guard has to work before anything optional is installed.
+    """
+    try:
+        with open("/proc/self/statm", "rb") as handle:
+            pages = int(handle.read().split()[1])
+        return pages * os.sysconf("SC_PAGE_SIZE") / 1048576
+    except (OSError, ValueError, IndexError, AttributeError):
+        return None
+
+
+def auto_ceiling(share=0.70, floor_mb=384):
+    """A resident-memory budget derived from the machine, or 0 where unknown.
+
+    Seventy per cent of total memory: the rest belongs to the page cache, the
+    interpreter's own fragmentation and whatever else shares the box. Tuned for
+    a small instance with no swap, where exceeding the budget is fatal rather
+    than merely slow.
+    """
+    try:
+        with open("/proc/meminfo", "rb") as handle:
+            for line in handle:
+                if line.startswith(b"MemTotal:"):
+                    total = int(line.split()[1]) / 1024
+                    return max(int(total * share), floor_mb)
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
 def build(address, helius, sol_price, now=None, quote_marks=True, max_pages=400,
           min_history_days=30, max_forwarded=0.8, min_closing_sample=20,
-          max_transactions=60000):
+          max_transactions=60000, memory_ceiling_mb=0):
     """-> (ledger or None, report). None means the wallet cannot be ranked honestly.
 
     Being unusable is an ordinary outcome, not an error, so the report always
@@ -156,6 +190,16 @@ def build(address, helius, sol_price, now=None, quote_marks=True, max_pages=400,
                         decimals[balance["mint"]] = int((balance.get("uiTokenAmount") or {})["decimals"])
             normalized.append(normalize(entry, address))
             seen += 1
+            # A transaction count is a proxy for memory; resident memory is the
+            # thing that actually kills the process, so it is also checked. One
+            # wallet refused is a result that the report can show. A process
+            # killed by the kernel loses the whole cycle and says nothing.
+            if memory_ceiling_mb and not seen % 2048:
+                rss = resident_mb()
+                if rss and rss > memory_ceiling_mb:
+                    return None, {"address": address, "rpc_calls": helius.calls, "usable": False,
+                                  "blocked_by": "memory_ceiling", "resident_mb": round(rss),
+                                  "ceiling_mb": memory_ceiling_mb, "transactions_seen": seen}
             if seen > max_transactions:
                 # No single wallet may cost the process its memory: refusing it
                 # is a result, being killed halfway through is not.
@@ -174,6 +218,7 @@ def build(address, helius, sol_price, now=None, quote_marks=True, max_pages=400,
                       "blocked_by": f"history_shorter_than_{min_history_days}_days"}
     sol_price.load(first - 3600, now)
     rows, rejected, skipped = rows_from_normalized(normalized, quote_pricer(sol_price))
+    normalized = None
     by_side = reason_counts([{"reason": r["side"]} for r in rows])
     report.update(usable_rows=len(rows), rows_by_side=by_side, unreconstructable=len(rejected),
                   reasons=reason_counts(rejected), unclassified=skipped)

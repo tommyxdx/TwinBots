@@ -485,7 +485,9 @@ class WalletWorkflow(unittest.TestCase):
 
     def test_wallet_maintenance_skips_token_models_and_history(self):
         fetcher = Mock()
-        with patch("twobots.runtime.train_cex") as cex, patch("twobots.runtime.train_scanner") as tokens:
+        # Patched at the source: maintain imports these lazily so the science
+        # stack stays out of a wallet-only process.
+        with patch("twobots.models.train_cex") as cex, patch("twobots.models.train_scanner") as tokens:
             maintain(self.cfg, self.store, fetcher, True)
             cex.assert_called_once()
             tokens.assert_not_called()

@@ -60,17 +60,24 @@ def fetch(url, cap=256 * 1024 * 1024, missing_ok=False):
 class SolPrice:
     """Minute closes for SOLUSDT, cached on disk and verified against Binance's SHA256."""
 
-    def __init__(self, cache_dir, symbol="SOLUSDT", interval="1m"):
+    def __init__(self, cache_dir, symbol="SOLUSDT", interval="1m", fine_days=120,
+                 coarse_interval="1h"):
         self.cache = Path(cache_dir)
         self.cache.mkdir(parents=True, exist_ok=True)
         self.symbol, self.interval = symbol, interval
+        # Minute bars only where the ranking actually looks. Older transactions
+        # matter as cost basis carried into the window, which an hourly close
+        # prices to well under a per cent — and a three-year minute series costs
+        # more memory than the machine has once loading transiently triples it.
+        self.fine_days, self.coarse_interval = fine_days, coarse_interval
         self.times, self.closes, self.loaded, self.missing = [], [], set(), []
 
-    def _archive(self, kind, key):
+    def _archive(self, kind, key, interval=None):
         """One monthly or daily kline file, cached and checksum-verified. None if absent."""
-        name = f"{self.symbol}-{self.interval}-{key}.zip"
+        interval = interval or self.interval
+        name = f"{self.symbol}-{interval}-{key}.zip"
         path = self.cache / name
-        url = f"{ARCHIVE}/{kind}/klines/{self.symbol}/{self.interval}/{name}"
+        url = f"{ARCHIVE}/{kind}/klines/{self.symbol}/{interval}/{name}"
         if path.exists():
             raw = path.read_bytes()
         else:
@@ -128,10 +135,17 @@ class SolPrice:
         """
         points = dict(zip(self.times, self.closes))
         today = datetime.fromtimestamp(end_ts, timezone.utc).date()
+        fine_from = end_ts - self.fine_days * 86400
         for month in months_covering(start_ts, end_ts):
             if month in self.loaded or month == today.strftime("%Y-%m"):
                 continue
-            found = self._archive("monthly", month)
+            # A month wholly before the fine window is priced hourly. A month
+            # straddling its edge stays at minute resolution.
+            begins = datetime.strptime(month, "%Y-%m").replace(tzinfo=timezone.utc)
+            ends = (begins + timedelta(days=32)).replace(day=1)
+            coarse = ends.timestamp() <= fine_from
+            interval = self.coarse_interval if coarse else self.interval
+            found = self._archive("monthly", month, interval)
             if found is None:
                 self.missing.append(month)
                 continue
@@ -151,6 +165,10 @@ class SolPrice:
         if end_ts >= datetime.combine(today, datetime.min.time(),
                                       tzinfo=timezone.utc).timestamp():
             points.update(self._today(end_ts))
+        # Release the old arrays before building their replacements. Holding
+        # both of them and the merge dict at once is the peak allocation of the
+        # entire process, and it is reached on a box with no swap.
+        self.times = self.closes = []
         self.times = sorted(points)
         self.closes = [points[t] for t in self.times]
         return len(self.times)
@@ -161,8 +179,9 @@ class SolPrice:
         index = bisect.bisect_right(self.times, ts) - 1
         if index < 0:
             raise ValueError(f"No SOL price at or before {ts}; widen the loaded range")
-        # A long gap means the series does not actually cover this execution.
-        if ts - self.times[index] > 3600:
+        # Two hours: hourly bars sit up to an hour apart by construction, so a
+        # wider gap than that is a real hole rather than the coarse resolution.
+        if ts - self.times[index] > 7200:
             raise ValueError(f"SOL price gap of {ts - self.times[index]}s at {ts}")
         # Held as float per bar, widened here: one lookup per trade, not per minute.
         return Decimal(str(self.closes[index]))
