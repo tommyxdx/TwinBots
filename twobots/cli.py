@@ -328,18 +328,30 @@ async def supervise(tasks,engines,cfg,store,close_positions,grace_s=10):
     """
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
-    previous = None
-    try:
-        previous = signal.getsignal(signal.SIGINT)
-        signal.signal(signal.SIGINT,lambda *_: loop.call_soon_threadsafe(stop.set))
-    except (ValueError,OSError):
-        pass  # Not the main thread; KeyboardInterrupt handling stays with the caller.
+    # SIGTERM as well as SIGINT: run in the background with nohup, or under a
+    # service manager, and plain `kill` is how it gets stopped. Left on the
+    # default disposition that killed the process outright -- no final report,
+    # no orderly feed shutdown -- which is the opposite of what the graceful
+    # path exists for, and indistinguishable in the log from an OOM kill.
+    previous = {}
+    for name in ("SIGINT","SIGTERM"):
+        number = getattr(signal,name,None)
+        if number is None:
+            continue
+        try:
+            previous[number] = signal.getsignal(number)
+            signal.signal(number,lambda *_: loop.call_soon_threadsafe(stop.set))
+        except (ValueError,OSError):
+            pass  # Not the main thread; signal handling stays with the caller.
     watcher = asyncio.create_task(stop.wait())
     try:
         await asyncio.wait([*tasks,watcher],return_when=asyncio.FIRST_COMPLETED)
     finally:
-        if previous is not None:
-            signal.signal(signal.SIGINT,previous)
+        for number,handler in previous.items():
+            try:
+                signal.signal(number,handler)
+            except (ValueError,OSError):
+                pass
         watcher.cancel()
         logging.info("Stopping: %s, then final report. Paper state is retained.",
                      "closing positions" if close_positions else "keeping open positions")

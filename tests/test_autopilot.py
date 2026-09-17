@@ -329,6 +329,31 @@ def test_a_task_that_refuses_to_die_cannot_block_the_exit(env):
     assert time.time() - started < 5
 
 
+@pytest.mark.skipif(not hasattr(__import__("signal"), "SIGTERM"), reason="no SIGTERM")
+def test_sigterm_winds_down_the_same_way_as_an_interrupt(env):
+    """Ctrl+C is not how a background run ends. Started with nohup, or under a
+    service manager, it is stopped with plain `kill` -- SIGTERM -- which on the
+    default disposition killed the process outright: no final report, no
+    orderly feed shutdown, and a log that ends mid-line exactly like an OOM
+    kill, which is precisely the confusion that cost two nights."""
+    import asyncio
+    import signal as signal_module
+    from twobots.cli import supervise
+    cfg, store, _ = env
+    engines = [FakeEngine("cex"), FakeEngine("copy")]
+
+    async def main():
+        tasks = [asyncio.create_task(e.run()) for e in engines]
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.05, signal_module.raise_signal, signal_module.SIGTERM)
+        await supervise(tasks, engines, cfg, store, False, grace_s=1)
+
+    asyncio.run(main())
+    assert all(e.cancelled for e in engines), "the venues are wound down, not killed"
+    assert (Path(cfg["data_dir"]) / "reports" / "latest.html").exists(), "final report written"
+    assert signal_module.getsignal(signal_module.SIGTERM) is signal_module.SIG_DFL,         "the previous disposition is restored"
+
+
 def test_a_real_sigint_winds_down_inside_the_loop(env):
     """The actual interrupt path: SIGINT must become an event, not unwind the loop.
 
