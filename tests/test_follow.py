@@ -392,7 +392,9 @@ def test_one_busy_leader_cannot_spend_the_whole_book(env):
     cfg, store, ledgers, activity = env
     cfg["follow"].update(max_leaders=4, initial_cash=100, ticket_usd=10, leader_share=0.0)
     bot = trader(cfg, store)
-    assert bot.leader_budget() == 25, "an even split of the book across four leaders"
+    assert bot.leader_budget(["A", "B", "C", "D"]) == 25, "an even split across four leaders"
+    # With one leader there is nobody to protect, so the book is not left idle.
+    assert bot.leader_budget(["A"]) == 100
     state = {"positions": {"t1": {"leader": "A", "last_value": 20},
                            "t2": {"leader": "B", "last_value": 40}}}
     assert bot.leader_exposure(state, "A") == 20
@@ -400,7 +402,7 @@ def test_one_busy_leader_cannot_spend_the_whole_book(env):
     assert bot.leader_exposure(state, "C") == 0
     # A explicit share overrides the even split.
     cfg["follow"]["leader_share"] = 0.1
-    assert trader(cfg, store).leader_budget() == 10
+    assert trader(cfg, store).leader_budget(["A"]) == 10, "an explicit share pins it"
 
 
 def test_the_report_keeps_the_platform_cost_even_when_it_is_not_charged(env):

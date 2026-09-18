@@ -156,14 +156,19 @@ class CopyTrader(DexPaper):
                 break
         return chosen
 
-    def leader_budget(self):
+    def leader_budget(self, leaders):
         """USD one leader may have at risk at once.
 
         Raising `max_leaders` is what lifts the signal rate; this is what keeps
         one hyperactive wallet from spending the whole book before the quieter
-        leaders are heard from at all. Zero splits the book evenly.
+        leaders are heard from at all.
+
+        Zero splits the book between the leaders there actually are, not the
+        most there could be: the cap exists to protect the other leaders' share,
+        so with one leader there is nobody to protect and no reason to leave
+        most of the book idle. Set `leader_share` to pin it instead.
         """
-        share = self.f["leader_share"] or 1 / max(1, self.f["max_leaders"])
+        share = self.f["leader_share"] or 1 / max(1, len(leaders))
         return self.f["initial_cash"] * share
 
     def leader_exposure(self, state, leader):
@@ -304,7 +309,7 @@ class CopyTrader(DexPaper):
             # Each leader gets its own slice of the book, so a burst from one
             # wallet cannot crowd out every other leader's signals.
             if (self.leader_exposure(state, signal["leader"]) + self.c["ticket_usd"]
-                    > self.leader_budget()):
+                    > self.leader_budget(leaders)):
                 self.store.event("copy_leader_budget_full",
                                  {"leader": signal["leader"], "token": token})
                 continue
