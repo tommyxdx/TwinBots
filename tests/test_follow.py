@@ -36,8 +36,11 @@ def address(number):
 def ledger(number, cycles, marks=None):
     """cycles: list of (token_index, realised_pnl_usd) clean buy -> full sell round trips."""
     txs = []
+    # Spread across the whole 85-day history and up to the present, so a wallet
+    # the fixtures call followable has recent fills as well as a long record.
+    step = 84 * DAY / max(1, len(cycles) - 1)
     for i, (token, pnl) in enumerate(cycles):
-        ts = NOW - 85 * DAY + i * 2 * DAY
+        ts = NOW - 85 * DAY + i * step
         txs.append({"id": f"{i}:b", "ts": ts, "token": address(token), "side": "buy",
                     "quantity": "1", "notional_usd": "500", "fee_usd": "0"})
         txs.append({"id": f"{i}:s", "ts": ts + 3600, "token": address(token), "side": "sell",
@@ -319,7 +322,107 @@ def test_flagged_only_ranking_reports_the_flag_gate(env):
                                                              for i in range(29)])])
     bot = trader(cfg, store)
     assert bot.leaders(time.time()) == []
-    assert "allowed_flags" in bot.idle_reason(time.time())
+    # Naming the gate that actually fired beats naming the only one there used
+    # to be: selection now refuses for several different reasons.
+    assert "flagged" in bot.idle_reason(time.time())
+
+
+def quiet_since(data, days):
+    """The same wallet with nothing traded in the last `days` days."""
+    shifted = dict(data)
+    shifted["transactions"] = [{**t, "ts": t["ts"] - days * DAY} for t in data["transactions"]]
+    return shifted
+
+
+def test_a_wallet_that_has_stopped_trading_is_not_followed(env):
+    """A 90-day record says a wallet could trade, not that it still does. The
+    top-ranked wallet on the live box had made twelve transactions in a week and
+    was mostly receiving transfers: following it produced no signals at all
+    while holding a leader slot an active wallet would have used."""
+    cfg, store, ledgers, activity = env
+    cfg["follow"]["min_recent_fills"] = 4
+    rank(cfg, store, ledgers, [quiet_since(ledger(704, GOOD), 30)])
+    bot = trader(cfg, store)
+    assert bot.leaders(time.time()) == []
+    assert "dormant" in bot.idle_reason(time.time())
+    # The same wallet still trading is followed, so the gate is about recency.
+    rank(cfg, store, ledgers, [ledger(705, GOOD)])
+    assert address(705) in trader(cfg, store).leaders(time.time())
+
+
+def test_retention_refuses_a_wallet_that_keeps_dropping_out(env):
+    """One good ranking is what a lucky streak looks like. Surviving several
+    independent rankings is the cheapest evidence of the opposite."""
+    cfg, store, ledgers, activity = env
+    cfg["follow"].update(min_retention=0.5, min_retention_snapshots=4, retention_snapshots=7)
+    rank(cfg, store, ledgers, [ledger(706, GOOD)])
+    who = address(706)
+    bot = trader(cfg, store)
+    assert who in bot.leaders(time.time()), "no history yet, so nothing is held against it"
+
+    # Analysed in five earlier rankings, scored in only one of them.
+    with store.transaction() as db:
+        for i in range(5):
+            db.execute("INSERT INTO rankings(ts,address,rank,score) VALUES(?,?,?,?)",
+                       (time.time() - (i + 1) * DAY, who, 1 if i == 0 else None, 40.0))
+    bot = trader(cfg, store)
+    assert bot.leaders(time.time()) == []
+    assert "not_retained" in bot.idle_reason(time.time())
+
+
+def test_a_newly_reconstructed_wallet_is_not_punished_for_having_no_history(env):
+    """Retention counts the rankings that looked at the wallet, not every
+    ranking. Counting every one would refuse each new wallet forever, which is
+    the same starvation bug in a different place."""
+    cfg, store, ledgers, activity = env
+    cfg["follow"].update(min_retention=0.5, min_retention_snapshots=4)
+    rank(cfg, store, ledgers, [ledger(707, GOOD)])
+    other = address(999)
+    with store.transaction() as db:
+        for i in range(6):
+            db.execute("INSERT INTO rankings(ts,address,rank,score) VALUES(?,?,?,?)",
+                       (time.time() - (i + 1) * DAY, other, 1, 40.0))
+    assert address(707) in trader(cfg, store).leaders(time.time())
+
+
+def test_one_busy_leader_cannot_spend_the_whole_book(env):
+    """Raising max_leaders is what lifts the signal rate; the per-leader slice
+    is what stops the first burst consuming the cash before the other leaders
+    are heard from."""
+    cfg, store, ledgers, activity = env
+    cfg["follow"].update(max_leaders=4, initial_cash=100, ticket_usd=10, leader_share=0.0)
+    bot = trader(cfg, store)
+    assert bot.leader_budget() == 25, "an even split of the book across four leaders"
+    state = {"positions": {"t1": {"leader": "A", "last_value": 20},
+                           "t2": {"leader": "B", "last_value": 40}}}
+    assert bot.leader_exposure(state, "A") == 20
+    assert bot.leader_exposure(state, "B") == 40
+    assert bot.leader_exposure(state, "C") == 0
+    # A explicit share overrides the even split.
+    cfg["follow"]["leader_share"] = 0.1
+    assert trader(cfg, store).leader_budget() == 10
+
+
+def test_the_report_keeps_the_platform_cost_even_when_it_is_not_charged(env):
+    """Measuring the theoretical edge first is the right order, but the number
+    is only useful beside the cost of capturing it. Recording it as the run goes
+    means that comparison never needs the run repeated."""
+    from twobots.report import platform_fee_note, refused_costs
+    cfg, store, ledgers, activity = env
+    cfg["follow"].update(platform_fee_fraction=0.0, platform_fee_reference=0.01, ticket_usd=10)
+    note = platform_fee_note(cfg, 6)
+    assert "$1.20" in note, "6 fills x $10 x two legs x 1%"
+    assert "未计入" in note and "0.00%" in note
+    cfg["follow"]["platform_fee_fraction"] = 0.01
+    assert "已计入" in platform_fee_note(cfg, 6)
+    assert platform_fee_note(cfg, 0) == "", "nothing filled, nothing to say"
+    # And the refused round-trips are kept, so a screen that refuses everything
+    # is distinguishable from a market that is genuinely too dear.
+    spread = refused_costs([{"status": "ROUNDTRIP_COST_REJECTED", "cost_fraction": 0.031},
+                            {"status": "ROUNDTRIP_COST_REJECTED", "cost_fraction": 0.09},
+                            {"status": "FILLED"}])
+    assert "被拒 2 次" in spread and "3.10%" in spread and "9.00%" in spread
+    assert refused_costs([{"status": "FILLED"}]) == ""
 
 
 def test_the_platform_fee_is_charged_on_every_leg(env):

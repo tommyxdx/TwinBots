@@ -98,20 +98,77 @@ class CopyTrader(DexPaper):
         notional = self.usd(amount if side == "BUY" else quote["out_amount"])
         return super().venue_fee(side, amount, quote) + notional * self.f["platform_fee_fraction"]
 
+    def retention(self, snapshots):
+        """-> {address: (kept, seen)} across the most recent ranking snapshots.
+
+        A wallet that tops one ranking and is gone from the next is the shape a
+        lucky streak makes. Surviving several independent rankings is the
+        cheapest evidence of the opposite, and it costs nothing: the snapshots
+        are already kept for the forward test.
+
+        `seen` counts the rankings that analysed the wallet at all, so a wallet
+        that has only just been reconstructed has nothing held against it. Only
+        a wallet with a real record of dropping out is refused.
+        """
+        stamps = [r["ts"] for r in self.store.rows(
+            "SELECT DISTINCT ts FROM rankings ORDER BY ts DESC LIMIT ?", (snapshots,))]
+        if not stamps:
+            return {}
+        marks = ",".join("?" * len(stamps))
+        rows = self.store.rows(
+            "SELECT address, COUNT(*) AS seen, SUM(rank IS NOT NULL) AS kept "
+            f"FROM rankings WHERE ts IN ({marks}) GROUP BY address", stamps)
+        return {r["address"]: (r["kept"] or 0, r["seen"]) for r in rows}
+
+    def unfollowable(self, row, now, held):
+        """Why this ranked wallet cannot be followed, or None if it can."""
+        if row["score"] is None or row["score"] < self.f["min_score"]:
+            return "below_min_score"
+        if now - row["asof"] > self.f["ranking_max_age_s"]:
+            return "ledger_stale"
+        if set(row["flags"]) - set(self.f["allowed_flags"]):
+            return "flagged"
+        # A 90-day record says a wallet could trade, not that it still does.
+        # Following one that has gone quiet produces no signals at all, and it
+        # holds a leader slot that an active wallet would have used.
+        recent = (row.get("windows") or {}).get("7") or {}
+        if (recent.get("trade_fills") or 0) < self.f["min_recent_fills"]:
+            return "dormant"
+        kept, seen = held.get(row["address"], (0, 0))
+        if seen >= self.f["min_retention_snapshots"] and kept / seen < self.f["min_retention"]:
+            return "not_retained"
+        return None
+
     def leaders(self, now):
+        self.skipped = {}
         report = self.store.get("wallet:latest")
         if not report or now - report["generated_at"] > self.f["ranking_max_age_s"]:
             return []
+        held = self.retention(self.f["retention_snapshots"])
         chosen = []
         for row in report["ranking"]:
-            if (row["score"] is None or row["score"] < self.f["min_score"]
-                    or now - row["asof"] > self.f["ranking_max_age_s"]
-                    or set(row["flags"]) - set(self.f["allowed_flags"])):
+            why = self.unfollowable(row, now, held)
+            if why:
+                self.skipped[why] = self.skipped.get(why, 0) + 1
                 continue
             chosen.append(row["address"])
             if len(chosen) >= self.f["max_leaders"]:
                 break
         return chosen
+
+    def leader_budget(self):
+        """USD one leader may have at risk at once.
+
+        Raising `max_leaders` is what lifts the signal rate; this is what keeps
+        one hyperactive wallet from spending the whole book before the quieter
+        leaders are heard from at all. Zero splits the book evenly.
+        """
+        share = self.f["leader_share"] or 1 / max(1, self.f["max_leaders"])
+        return self.f["initial_cash"] * share
+
+    def leader_exposure(self, state, leader):
+        return sum(p.get("last_value", 0) or 0 for p in state["positions"].values()
+                   if p.get("leader") == leader)
 
     def signals(self, leaders, now):
         seen = self.store.get("copy:seen", {})
@@ -197,6 +254,10 @@ class CopyTrader(DexPaper):
                     f"closed cycles), {len(report['unavailable'])} still without a ledger")
         if not [r for r in ranked if r["score"] >= self.f["min_score"]]:
             return f"best score {max(r['score'] for r in ranked):.1f} is below min_score {self.f['min_score']}"
+        skipped = getattr(self, "skipped", {})
+        if skipped:
+            return "no wallet passed leader selection (" + ", ".join(
+                f"{k} x{v}" for k, v in sorted(skipped.items(), key=lambda kv: -kv[1])) + ")"
         return "every ranked wallet carries a flag outside allowed_flags"
 
     async def step(self):
@@ -239,6 +300,13 @@ class CopyTrader(DexPaper):
             if (bought or token in state["positions"]
                     or len(state["positions"]) >= self.c["max_positions"]
                     or signal["notional_usd"] < self.f["min_leader_notional_usd"]):
+                continue
+            # Each leader gets its own slice of the book, so a burst from one
+            # wallet cannot crowd out every other leader's signals.
+            if (self.leader_exposure(state, signal["leader"]) + self.c["ticket_usd"]
+                    > self.leader_budget()):
+                self.store.event("copy_leader_budget_full",
+                                 {"leader": signal["leader"], "token": token})
                 continue
             key = "copy:attempt:" + token
             if now - self.store.get(key, 0) < self.f["cooldown_s"]:

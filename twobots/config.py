@@ -132,7 +132,10 @@ def load_config(path="config.yaml"):
                        "max_leaders": 3, "min_score": 10.0, "allowed_flags": [],
                        "activity_poll_s": 30, "activity_lookback_s": 900, "status_every_s": 300,
                        "ranking_max_age_s": 21600, "max_feed_age_s": 300, "max_signal_age_s": 120,
-                       "platform_fee_fraction": 0.01,
+                       "platform_fee_fraction": 0.01, "platform_fee_reference": 0.01,
+                       "min_recent_fills": 4, "leader_share": 0.0,
+                       "retention_snapshots": 7, "min_retention": 0.5,
+                       "min_retention_snapshots": 4,
                        "min_leader_notional_usd": 50.0, "seen_memory": 5000, "cooldown_s": 3600,
                        "mirror_exits": True, "max_activity_mb": 4,
                        "initial_cash": 100, "ticket_usd": 2, "max_positions": 3,
@@ -141,6 +144,16 @@ def load_config(path="config.yaml"):
     f = cfg["follow"] = {**follow_defaults, **cfg.get("follow", {})}
     if f["source"] not in ("local", "adapter") or type(f["enabled"]) is not bool or type(f["mirror_exits"]) is not bool:
         raise ValueError("Invalid follow source/enabled/mirror_exits configuration")
+    for key in ("min_recent_fills", "retention_snapshots", "min_retention_snapshots"):
+        if type(f[key]) is not int or f[key] < 0:
+            raise ValueError(f"follow.{key} must be a non-negative integer")
+    # Zero means split the book evenly between max_leaders.
+    if not 0 <= f["leader_share"] <= 1:
+        raise ValueError("follow.leader_share must be between 0 (even split) and 1")
+    if not 0 <= f["platform_fee_reference"] <= 1:
+        raise ValueError("follow.platform_fee_reference must be between 0 and 1")
+    if not 0 <= f["min_retention"] <= 1:
+        raise ValueError("follow.min_retention must be between 0 and 1")
     if f["enabled"] and cfg["scanner"]["kind"] != "wallets":
         raise ValueError("follow.enabled requires scanner.kind: wallets to produce a ranking")
     for key in ("max_leaders", "ranking_max_age_s", "max_feed_age_s", "max_signal_age_s",

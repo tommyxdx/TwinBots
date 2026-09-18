@@ -41,6 +41,39 @@ def forward_test(store,horizon_days=7):
                    "evidence only across many pairs, never from one."}
 
 
+def platform_fee_note(cfg, filled):
+    """What a copy-trading platform would have taken, whether or not it is charged.
+
+    Measuring the theoretical edge first is the right order, but the number is
+    only useful next to the cost of actually capturing it. Recording it here
+    means the comparison never needs the run repeated.
+    """
+    f = cfg["follow"]
+    rate, charged = f["platform_fee_reference"], f["platform_fee_fraction"]
+    if not filled or not rate:
+        return ""
+    # Entry is the ticket exactly; the exit leg is approximated by it.
+    estimate = filled * f["ticket_usd"] * 2 * rate
+    state = ("已计入成交" if charged else "当前未计入，只测理论 edge")
+    return (f"<p>平台费参考：按 {rate * 100:.2f}%/腿、{filled} 次成交估算约 "
+            f"${estimate:.2f}（{state}；实际计费率 {charged * 100:.2f}%）。</p>")
+
+
+def refused_costs(entries):
+    """The round-trip costs that were refused, so the screen can be judged.
+
+    A screen that refuses everything and a market that is genuinely too dear
+    look identical from the outside until the distribution is written down.
+    """
+    costs = sorted(e["cost_fraction"] for e in entries
+                   if e.get("status") == "ROUNDTRIP_COST_REJECTED"
+                   and isinstance(e.get("cost_fraction"), (int, float)))
+    if not costs:
+        return ""
+    return (f"<p>因往返成本被拒 {len(costs)} 次：最低 {costs[0] * 100:.2f}%、"
+            f"中位 {costs[len(costs) // 2] * 100:.2f}%、最高 {costs[-1] * 100:.2f}%。</p>")
+
+
 def build_report(cfg,store):
     accounts = {}
     for venue in ("cex","dex","copy"):
@@ -202,7 +235,9 @@ def export_report(cfg,store):
                      + (html.escape("、".join(leaders["addresses"])) or "无合格钱包")
                      + f"。最近 {len(entries)} 次入场信号中成交 {len(filled)} 次"
                      + (f"，跟单延迟中位数 {sorted(lags)[len(lags)//2]:.1f} 秒" if lags else "")
-                     + "。成交价是本程序自己的报价，不是被跟随钱包的成交价。</p></section>")
+                     + "。成交价是本程序自己的报价，不是被跟随钱包的成交价。</p>"
+                     + platform_fee_note(cfg, len(filled))
+                     + refused_costs(entries) + "</section>")
     for venue,item in report["accounts"].items():
         state = item["account"]
         marks = item["latest_mark"]
