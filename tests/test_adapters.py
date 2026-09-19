@@ -498,6 +498,43 @@ def test_an_unrelated_rpc_error_is_not_retried_as_a_version_problem():
     assert unsupported_version(None) is None
 
 
+def test_leader_fills_carry_the_raw_quantity_they_received():
+    """Without it a follower cannot tell buying beside the leader from buying
+    the top of the leader's own impact."""
+    from adapters.activity import fills_from_entries
+    from adapters.reconstruct import SOL_MINT
+    mint, wallet = "Mint1111111111111111111111111111111111111111", "Wallet111111111111111111111111111111111111"
+    entry = {"blockTime": 1_700_000_000, "slot": 7, "signature": "sig",
+             "transaction": {"message": {"accountKeys": [wallet]}, "signatures": ["sig"]},
+             "meta": {"err": None, "fee": 5000,
+                      "preBalances": [3_000_005_000], "postBalances": [1_000_000_000],
+                      "preTokenBalances": [],
+                      "postTokenBalances": [{"owner": wallet, "mint": mint,
+                                             "uiTokenAmount": {"amount": "123456789",
+                                                               "decimals": 6}}]}}
+    [fill] = fills_from_entries([entry], wallet, lambda m, ts: Decimal("100"))
+    assert fill["side"] == "buy" and fill["token"] == mint
+    assert fill["quantity_raw"] == "123456789", "exact raw units, not a rounded float"
+    assert Decimal(fill["notional_usd"]) == Decimal("200"), "2 SOL at $100"
+
+
+def test_a_scoped_client_cannot_spend_the_trading_budget(tmp_path):
+    """An exhausted budget fails every quote, an unquoted position is marked at
+    zero, and a zero mark is how the trading book gets halted on drawdown. So
+    the book that only measures draws on an allowance of its own."""
+    from twobots.storage import Store
+    store = Store(tmp_path)
+    try:
+        for _ in range(3):
+            store.budget(3, "shadow")
+        with pytest.raises(RuntimeError, match="for shadow"):
+            store.budget(3, "shadow")
+        store.budget(3)          # the unscoped allowance is untouched
+        store.budget(3)
+    finally:
+        store.close()
+
+
 def test_a_sample_stops_at_the_page_cap_without_calling_it_a_failure():
     """Any active wallet has more than one page, and the shape sample only wants
     one. Treating 'there is more' as an error rejected every real trader at the

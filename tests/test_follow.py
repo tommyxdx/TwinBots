@@ -80,7 +80,17 @@ class NoNetwork:
         raise AssertionError("Copy trading tests must never access a network")
 
 
+def at_leader_price(notional_usd):
+    """The raw quantity a leader receives at the stub's own price: no chase."""
+    return str(int(float(notional_usd) * 10 ** 6 / TOKEN_PRICE_USD))
+
+
 def write_activity(folder, leader, fills, asof=None):
+    # Tests about other gates get a leader who paid what we would pay, so the
+    # chase gate stays out of their way; chase tests supply their own quantity.
+    fills = [{**f, "quantity_raw": at_leader_price(f["notional_usd"])}
+             if "quantity_raw" not in f and f.get("side") in ("buy", "sell")
+             and float(f.get("notional_usd") or 0) > 0 else f for f in fills]
     folder.mkdir(parents=True, exist_ok=True)
     (folder / (leader + ".json")).write_text(json.dumps(
         {"schema_version": 1, "network": "solana", "address": leader,
@@ -425,6 +435,169 @@ def test_the_report_keeps_the_platform_cost_even_when_it_is_not_charged(env):
                             {"status": "FILLED"}])
     assert "被拒 2 次" in spread and "3.10%" in spread and "9.00%" in spread
     assert refused_costs([{"status": "FILLED"}]) == ""
+
+
+def paid_over_leader(notional_usd, times):
+    """A leader quantity such that we pay `times` what the leader did per token."""
+    return str(int(float(notional_usd) * 10 ** 6 / TOKEN_PRICE_USD * times))
+
+
+def shadow(cfg, store):
+    from twobots.follow import ShadowTrader
+    return ShadowTrader(cfg, store, StubGateway(), ActivityFeed(cfg, NoNetwork()))
+
+
+def results(store, venue):
+    return [json.loads(r["payload"]) for r in store.rows(
+        "SELECT payload FROM events WHERE kind=? ORDER BY id", (venue + "_entry_result",))]
+
+
+def test_chase_is_measured_against_what_the_leader_actually_paid():
+    """The two losing copies on the live box paid 4.67x and 3.24x the leader's
+    price for the same token; the one winner paid 1.06x. Raw units per dollar,
+    so no decimals are needed and tiny prices compare exactly."""
+    from twobots.follow import chase_fraction
+    signal = lambda qty: {"notional_usd": 100.0, "quantity_raw": qty}
+    # We get 1,000 raw per dollar. A leader who got 4,670 per dollar paid 4.67x less.
+    assert abs(chase_fraction(signal(467_000), 10.0, 10_000) - 3.67) < 1e-9
+    assert abs(chase_fraction(signal(106_400), 10.0, 10_000) - 0.064) < 1e-9
+    # The price has since fallen below the leader's: negative, and never refused.
+    assert chase_fraction(signal(50_000), 10.0, 10_000) < 0
+    assert chase_fraction({"notional_usd": 100.0, "quantity_raw": None}, 10.0, 10_000) is None
+    assert chase_fraction({"notional_usd": 0.0, "quantity_raw": 5}, 10.0, 10_000) is None
+
+
+def test_a_signal_already_priced_past_the_leader_is_not_followed(env):
+    """Buying the top of the leader's own impact is how both live losses happened."""
+    cfg, store, ledgers, activity = env
+    rank(cfg, store, ledgers, [ledger(720, GOOD)])
+    leader, token = address(720), address(920)
+    write_activity(activity, leader, [{"id": "pump", "ts": time.time() - 5, "side": "buy",
+                                       "token": token, "notional_usd": "250",
+                                       "quantity_raw": paid_over_leader(250, 4.67)}])
+    bot = trader(cfg, store)
+    asyncio.run(bot.step())
+    assert token not in bot.ledger.state()["positions"]
+    [result] = results(store, "copy")
+    assert result["status"] == "CHASE_REJECTED"
+    assert abs(result["chase"] - 3.67) < 0.01, "the refusal records how far the price had run"
+    assert result["uid"] == leader + ":pump", "keyed by signal, so the two books count once"
+
+
+def test_a_signal_near_the_leader_price_is_followed(env):
+    cfg, store, ledgers, activity = env
+    rank(cfg, store, ledgers, [ledger(721, GOOD)])
+    leader, token = address(721), address(921)
+    write_activity(activity, leader, [{"id": "clip", "ts": time.time() - 5, "side": "buy",
+                                       "token": token, "notional_usd": "250",
+                                       "quantity_raw": paid_over_leader(250, 1.06)}])
+    bot = trader(cfg, store)
+    asyncio.run(bot.step())
+    assert token in bot.ledger.state()["positions"]
+    order = json.loads(store.rows("SELECT payload FROM orders WHERE venue='copy' AND side='BUY'")[0]["payload"])
+    assert abs(order["chase"] - 0.06) < 0.01 and order["leader"] == leader
+
+
+def test_an_unknown_leader_price_is_refused_by_the_gated_book_only(env):
+    """A feed that cannot say what the leader paid cannot show that the move is
+    still ahead of us. The trading book refuses it; the shadow still takes it, so
+    what the refusal cost remains measurable."""
+    cfg, store, ledgers, activity = env
+    rank(cfg, store, ledgers, [ledger(722, GOOD)])
+    leader, token = address(722), address(922)
+    fill = {"id": "blind", "ts": time.time() - 5, "side": "buy", "token": token, "notional_usd": "250"}
+    activity.mkdir(parents=True, exist_ok=True)
+    (activity / (leader + ".json")).write_text(json.dumps(
+        {"schema_version": 1, "network": "solana", "address": leader, "asof": time.time(),
+         "source": "SYNTHETIC_TEST_ONLY", "fills": [fill]}), encoding="utf-8")
+    gated, measured = trader(cfg, store), shadow(cfg, store)
+    asyncio.run(gated.step())
+    asyncio.run(measured.step())
+    assert results(store, "copy")[0]["status"] == "CHASE_UNVERIFIABLE"
+    assert token not in gated.ledger.state()["positions"]
+    assert token in measured.ledger.state()["positions"]
+
+
+def test_the_shadow_takes_what_the_gate_refuses_and_both_see_the_signal(env):
+    """Per-book keys: sharing `copy:seen` would let whichever book stepped first
+    swallow the signal for the other. And only the shadow can say what a refused
+    trade would have made, because it is the only one that takes it."""
+    cfg, store, ledgers, activity = env
+    rank(cfg, store, ledgers, [ledger(723, GOOD)])
+    leader, token = address(723), address(923)
+    write_activity(activity, leader, [{"id": "pump", "ts": time.time() - 5, "side": "buy",
+                                       "token": token, "notional_usd": "250",
+                                       "quantity_raw": paid_over_leader(250, 3.24)}])
+    gated, measured = trader(cfg, store), shadow(cfg, store)
+    asyncio.run(gated.step())
+    asyncio.run(measured.step())
+    assert token not in gated.ledger.state()["positions"]
+    assert token in measured.ledger.state()["positions"]
+    assert results(store, "copy")[0]["status"] == "CHASE_REJECTED"
+    assert results(store, "shadow")[0]["settled_status"] == "FILLED"
+    assert store.get("copy:seen") and store.get("shadow:seen"), "each book keeps its own"
+
+
+def test_the_shadow_ignores_halts_budgets_and_the_one_entry_limit(env):
+    """The live book halted after two losses and measured nothing for twelve
+    hours. The shadow's job is to keep measuring through exactly that."""
+    cfg, store, ledgers, activity = env
+    rank(cfg, store, ledgers, [ledger(724, GOOD)])
+    leader = address(724)
+    fills = [{"id": f"s{i}", "ts": time.time() - 5, "side": "buy", "token": address(924 + i),
+              "notional_usd": "250"} for i in range(4)]
+    write_activity(activity, leader, fills)
+    measured = shadow(cfg, store)
+    # A drawdown ceiling of 100% can only be reached by losing everything, and
+    # no leader's slice ever fills, so neither limit can stop it measuring.
+    assert measured.c["max_drawdown"] == 1.0 and measured.leader_budget([leader]) == float("inf")
+    asyncio.run(measured.step())
+    assert len(measured.ledger.state()["positions"]) == 4, "every signal, not one per step"
+
+
+def test_a_leader_whose_profit_is_its_own_impact_is_dropped(env):
+    """Screening at the signal only stops us buying one pump; screening the
+    leader stops us following a wallet whose whole record is pumps."""
+    cfg, store, ledgers, activity = env
+    cfg["follow"].update(max_chase_fraction=0.25, min_chase_samples=5, chase_window_days=7)
+    rank(cfg, store, ledgers, [ledger(725, GOOD)])
+    leader = address(725)
+    assert leader in trader(cfg, store).leaders(time.time()), "no record yet, so followed"
+    for i in range(6):
+        for venue in ("copy", "shadow"):   # both books record the same signal
+            store.event(venue + "_entry_result",
+                        {"leader": leader, "token": address(930 + i), "uid": f"{leader}:{i}",
+                         "chase": 2.5, "status": "CHASE_REJECTED"})
+    bot = trader(cfg, store)
+    assert bot.leaders(time.time()) == []
+    assert "impact_trader" in bot.idle_reason(time.time())
+    # Counted once per signal: six, not twelve. Below the sample floor it is kept.
+    assert len(bot.impact_record(time.time() + 301)[leader]) == 6
+    cfg["follow"]["min_chase_samples"] = 7
+    assert leader in trader(cfg, store).leaders(time.time())
+
+
+def test_a_leader_trading_near_its_own_fills_is_kept(env):
+    cfg, store, ledgers, activity = env
+    rank(cfg, store, ledgers, [ledger(726, GOOD)])
+    leader = address(726)
+    for i in range(8):
+        store.event("shadow_entry_result", {"leader": leader, "token": address(940 + i),
+                                            "uid": f"{leader}:{i}", "chase": 0.05,
+                                            "settled_status": "FILLED"})
+    assert leader in trader(cfg, store).leaders(time.time())
+
+
+def test_the_chase_card_splits_shadow_trades_by_what_the_gate_would_do(env):
+    from twobots.report import chase_card
+    cfg, store, ledgers, activity = env
+    trip = lambda chase, pnl: {"chase": chase, "pnl": pnl, "return": pnl / 8}
+    card = chase_card(cfg, [trip(0.05, 3.0)],
+                      [trip(0.06, 24.0), trip(0.1, -1.0), trip(3.67, -5.0), trip(2.24, -6.2)])
+    assert "闸门放行" in card and "闸门拦下" in card
+    assert "$+23.00" in card, "the let-through group, summed"
+    assert "$-11.20" in card, "the refused group: both live losses"
+    assert chase_card(cfg, [], []) == ""
 
 
 def test_the_platform_fee_is_charged_on_every_leg(env):

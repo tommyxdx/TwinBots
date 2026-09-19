@@ -12,6 +12,8 @@ Leaders are read from the bot's own store, so this never ranks anything itself.
 """
 from __future__ import annotations
 
+from decimal import Decimal
+
 import argparse
 import json
 import sqlite3
@@ -24,7 +26,7 @@ from twobots.config import load_env
 
 from .helius import Helius
 from .prices import SolPrice, quote_pricer
-from .reconstruct import classify, normalize, quote_usd
+from .reconstruct import classify, normalize, quote_usd, token_decimals
 
 MAX_FILLS = 500
 MAX_BODY = 8 * 1024 * 1024
@@ -53,14 +55,22 @@ def fills_from_entries(entries, address, price_usd):
     which the copy trader does not gate on; the entry side of a swap is dropped
     rather than sized from a number nobody has. Transfers are not trades.
     """
-    fills = []
+    fills, decimals = [], token_decimals(entries, address)
     for row in sorted((normalize(e, address) for e in entries),
                       key=lambda r: (r["ts"], r["slot"], r["order"])):
         side, payload = classify(row, quote_usd(row, price_usd))
         signature, ts = row["signature"], row["ts"]
         if side in ("buy", "sell"):
-            fills.append({"id": signature + ":0", "ts": ts, "side": side,
-                          "token": payload["token"], "notional_usd": str(payload["notional_usd"])})
+            fill = {"id": signature + ":0", "ts": ts, "side": side,
+                    "token": payload["token"], "notional_usd": str(payload["notional_usd"])}
+            places = decimals.get(payload["token"])
+            if places is not None:
+                # Raw units, so a follower can compare what it would pay per
+                # token with what the leader paid. On a thin pool the leader's
+                # own order can move the price several-fold, and a follower
+                # that cannot see this buys the leader's pump.
+                fill["quantity_raw"] = str(int(payload["quantity"] * (Decimal(10) ** places)))
+            fills.append(fill)
         elif side == "swap":
             fills.append({"id": signature + ":out", "ts": ts, "side": "sell",
                           "token": payload["token_out"], "notional_usd": "0"})

@@ -134,6 +134,8 @@ def load_config(path="config.yaml"):
                        "ranking_max_age_s": 21600, "max_feed_age_s": 300, "max_signal_age_s": 120,
                        "platform_fee_fraction": 0.01, "platform_fee_reference": 0.01,
                        "min_recent_fills": 4, "leader_share": 0.0,
+                       "max_chase_fraction": 0.25, "min_chase_samples": 5, "chase_window_days": 7,
+                       "shadow_enabled": True, "shadow_max_requests_per_day": 5000,
                        "retention_snapshots": 7, "min_retention": 0.5,
                        "min_retention_snapshots": 4,
                        "min_leader_notional_usd": 50.0, "seen_memory": 5000, "cooldown_s": 3600,
@@ -150,6 +152,14 @@ def load_config(path="config.yaml"):
     # Zero means split the book evenly between max_leaders.
     if not 0 <= f["leader_share"] <= 1:
         raise ValueError("follow.leader_share must be between 0 (even split) and 1")
+    # Zero turns the chase gate off entirely; it is a fraction of the leader's price.
+    if not 0 <= f["max_chase_fraction"] <= 100:
+        raise ValueError("follow.max_chase_fraction must be between 0 (off) and 100")
+    for key in ("min_chase_samples", "chase_window_days", "shadow_max_requests_per_day"):
+        if type(f[key]) is not int or f[key] <= 0:
+            raise ValueError(f"follow.{key} must be a positive integer")
+    if type(f["shadow_enabled"]) is not bool:
+        raise ValueError("follow.shadow_enabled must be true or false")
     if not 0 <= f["platform_fee_reference"] <= 1:
         raise ValueError("follow.platform_fee_reference must be between 0 and 1")
     if not 0 <= f["min_retention"] <= 1:

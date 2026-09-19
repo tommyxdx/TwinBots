@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import copy
 import threading
 import time
 import urllib.error
@@ -35,6 +36,21 @@ class HTTP:
         self.cfg, self.store = cfg["http"], store
         self.lock = threading.Lock()
         self.last = {}
+        self.scope, self.daily_cap = "", None
+
+    def scoped(self, scope, daily_cap):
+        """The same client drawing on a separate daily allowance.
+
+        Throttling stays shared -- the copy keeps the same lock and per-host
+        clock -- so two books never hit one host faster between them than one
+        would alone. Only the budget is split, so a book that merely measures
+        can never exhaust the one that trades: an exhausted budget fails every
+        quote, an unquoted position is marked at zero, and a zero mark is
+        exactly how the trading book gets halted on drawdown.
+        """
+        other = copy.copy(self)
+        other.scope, other.daily_cap = scope, daily_cap
+        return other
 
     def request(self, url, params=None, headers=None, body=None, max_bytes=None):
         if params:
@@ -45,7 +61,7 @@ class HTTP:
         cap = max_bytes or int(self.cfg["max_download_mb"] * 1024 * 1024)
         retries = self.cfg["retries"] if body is None else 0  # POST delivery may be ambiguous.
         for attempt in range(retries + 1):
-            self.store.budget(self.cfg["max_requests_per_day"])
+            self.store.budget(self.daily_cap or self.cfg["max_requests_per_day"], self.scope)
             with self.lock:
                 delay = self.cfg.get("host_intervals", {}).get(parsed.hostname, self.cfg["min_interval_s"])
                 time.sleep(max(0, self.last.get(parsed.hostname, 0) + delay - time.monotonic()))

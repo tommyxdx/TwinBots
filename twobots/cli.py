@@ -10,14 +10,14 @@ import shutil
 import signal
 import time
 from .config import load_config
-from .storage import Store
+from .storage import Store,dumps
 from .net import HTTP
 from .data import Fetcher
 from .notify import Telegram
 from .wallet_scanner import WalletScanner
 from .runtime import ProcessLock,maintain,maintenance_loop,scanner_loop
 from .dex import DexPaper,QuoteGateway
-from .follow import ActivityFeed,CopyTrader
+from .follow import ActivityFeed,CopyTrader,ShadowTrader
 from .report import export_report,forward_test
 
 
@@ -269,6 +269,9 @@ def parser():
     fw = commands.add_parser("forward",help="Did a high rank predict the next week?")
     fw.add_argument("--horizon-days",type=int,default=7)
     commands.add_parser("report")
+    rs = commands.add_parser("reset",help="Archive paper accounts and start them again from cash")
+    rs.add_argument("--venue",action="append",choices=tuple(RESET_LOCKS),
+                    help="Repeatable. Default: the copy book and its shadow, which are one experiment")
     demo = commands.add_parser("demo",help="Offline synthetic behavior demo, never performance evidence")
     demo.add_argument("--output",default="demo_output")
     return p
@@ -424,8 +427,58 @@ async def services(args,cfg,store,http,fetcher):
             engines.append(DexPaper(cfg,store,QuoteGateway(cfg,http)))
         if "copy" in venues:
             engines.append(CopyTrader(cfg,store,QuoteGateway(cfg,http),ActivityFeed(cfg,http)))
+            if cfg["follow"]["shadow_enabled"]:
+                shadow = http.scoped("shadow",cfg["follow"]["shadow_max_requests_per_day"])
+                engines.append(ShadowTrader(cfg,store,QuoteGateway(cfg,shadow),ActivityFeed(cfg,shadow)))
         tasks += [asyncio.create_task(engine.run()) for engine in engines]
         await supervise(tasks,engines,cfg,store,getattr(args,"close_positions",False))
+
+
+# The lock that proves nothing is writing a book. The shadow runs inside the
+# copy venue, so the copy lock covers both.
+RESET_LOCKS = {"copy":"copy","shadow":"copy","dex":"dex","cex":"cex"}
+
+
+def reset_accounts(store,venues):
+    """Archive each paper account and let it start again from cash.
+
+    Nothing is deleted. Orders and marks are relabelled `<venue>@<time>` and the
+    final account state is kept under `archive:`, so an earlier run stays
+    inspectable while the report and the risk limits see only the new one.
+
+    Refuses while a bot holds the venue's lock: a running book would write its
+    old state straight back over the reset, and the two would then disagree
+    about which positions exist.
+    """
+    stamp = time.strftime("%Y%m%dT%H%M%SZ",time.gmtime())
+    done = {}
+    with ExitStack() as stack:
+        for name in sorted({RESET_LOCKS[v] for v in venues}):
+            try:
+                stack.enter_context(ProcessLock(store.root,name))
+            except RuntimeError:
+                raise RuntimeError(f"A running bot holds {name}.lock. Stop it first: Ctrl+C in its "
+                                   "screen, or pkill -INT -f 'twobots run'.") from None
+        for venue in dict.fromkeys(venues):
+            label = f"{venue}@{stamp}"
+            state = store.get("account:"+venue)
+            with store.transaction() as db:
+                orders = db.execute("UPDATE orders SET venue=? WHERE venue=?",(label,venue)).rowcount
+                marks = db.execute("UPDATE marks SET venue=? WHERE venue=?",(label,venue)).rowcount
+                if state is not None:
+                    db.execute("INSERT OR REPLACE INTO kv VALUES(?,?)",
+                               ("archive:account:"+label,dumps(state)))
+                db.execute("DELETE FROM kv WHERE k IN (?,?,?) OR k LIKE ?",
+                           ("account:"+venue,venue+":seen",venue+":leaders",venue+":attempt:%"))
+            done[venue] = {"archived_as":label,"orders":orders,"marks":marks}
+            if state is not None:
+                done[venue].update(
+                    previous_cash=round(state["cash"],4),
+                    previous_realized_pnl=round(state["realized_pnl"],4),
+                    open_positions_discarded=len(state["positions"]),
+                    previous_equity=round(state["cash"]+sum(p.get("last_value",0) or 0
+                                                             for p in state["positions"].values()),4))
+    return done
 
 
 def main(argv=None):
@@ -467,6 +520,8 @@ def main(argv=None):
             output(forward_test(store,args.horizon_days))
         elif args.command=="report":
             output({"report":export_report(cfg,store)})
+        elif args.command=="reset":
+            output(reset_accounts(store,args.venue or ["copy","shadow"]))
         elif args.command=="train":
             if cfg["scanner"]["kind"] == "wallets" and args.target == "scanner":
                 output({"scanner":"Wallet ranking is deterministic and needs no model training"})

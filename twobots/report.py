@@ -74,9 +74,91 @@ def refused_costs(entries):
             f"中位 {costs[len(costs) // 2] * 100:.2f}%、最高 {costs[-1] * 100:.2f}%。</p>")
 
 
+def round_trips(cfg, store, venue):
+    """Closed trades of one book: each buy paired with the sale that emptied it.
+
+    Every exit sells the whole position, so a buy and the next sale of the same
+    token are one trade. Costs include the network fee on both legs.
+    """
+    d = cfg["dex"]
+    usd = lambda raw: raw / 10 ** d["quote_decimals"] * d["quote_usd"]
+    since = (store.get("account:" + venue) or {}).get("created_at", 0)
+    trips, holding = [], {}
+    for row in store.rows("SELECT created,side,symbol,payload FROM orders WHERE venue=? "
+                          "AND status='FILLED' AND created>=? ORDER BY created", (venue, since)):
+        order = json.loads(row["payload"])
+        if row["side"] == "BUY":
+            holding[row["symbol"]] = order
+            continue
+        buy = holding.pop(row["symbol"], None)
+        if buy is None:
+            continue
+        cost = usd(int(buy["raw_input"])) + (buy.get("network_fee") or 0)
+        proceeds = usd(int(order.get("stressed_output") or 0)) - (order.get("network_fee") or 0)
+        trips.append({"token": row["symbol"], "leader": buy.get("leader"), "chase": buy.get("chase"),
+                      "pnl": proceeds - cost, "return": proceeds / cost - 1 if cost else None,
+                      "held_s": row["created"] - buy["created"], "exit": order.get("reason")})
+    return trips
+
+
+def trip_row(label, trips):
+    if not trips:
+        return f"<tr><td>{html.escape(label)}</td><td>0</td><td>-</td><td>-</td><td>-</td></tr>"
+    returns = sorted(t["return"] for t in trips if t["return"] is not None)
+    wins = sum(1 for t in trips if t["pnl"] > 0)
+    return (f"<tr><td>{html.escape(label)}</td><td>{len(trips)}</td>"
+            f"<td>{wins / len(trips) * 100:.0f}%</td>"
+            f"<td>{returns[len(returns) // 2] * 100:+.1f}%</td>"
+            f"<td>${sum(t['pnl'] for t in trips):+.2f}</td></tr>")
+
+
+def chase_card(cfg, copy_trips, shadow_trips):
+    """Whether the chase gate earns its place, read off trades nobody filtered.
+
+    The shadow book takes every signal and records how far the price had
+    already moved past the leader's fill, so its closed trades split cleanly
+    into the ones the gate lets through and the ones it refuses. If the second
+    group does no worse than the first, the gate is costing trades for nothing.
+    """
+    limit = cfg["follow"]["max_chase_fraction"]
+    if not shadow_trips and not copy_trips:
+        return ""
+    within = [t for t in shadow_trips if t["chase"] is not None and t["chase"] <= limit]
+    beyond = [t for t in shadow_trips if t["chase"] is not None and t["chase"] > limit]
+    unknown = [t for t in shadow_trips if t["chase"] is None]
+    rows = [trip_row(f"影子：追价 ≤ {limit * 100:.0f}%（闸门放行）", within),
+            trip_row(f"影子：追价 > {limit * 100:.0f}%（闸门拦下）", beyond)]
+    if unknown:
+        rows.append(trip_row("影子：领投成交价未知", unknown))
+    rows.append(trip_row("正式账本：实际成交", copy_trips))
+    return ("<section><h2>追价闸：拦下的那些到底怎么样</h2>"
+            "<p>影子账本跟正式账本看同一批信号，但不受风控、仓位和追价闸约束，每笔都跟。"
+            "追价 = 我们每美元买到的币比领投少多少：100% 意味着我们付了领投的两倍。"
+            "下表按这个值把影子账本的已平仓交易分成两组——如果「拦下」那组并不比「放行」那组差，"
+            "说明闸门在白白放弃交易。</p>"
+            "<table><tr><th>组</th><th>笔数</th><th>胜率</th><th>中位收益</th><th>合计盈亏</th></tr>"
+            + "".join(rows) + "</table>"
+            "<p>每组少于 20 笔之前，这张表是记录而不是结论。</p></section>")
+
+
+def refused_chases(cfg, entries):
+    refused = [e for e in entries if e.get("status") in ("CHASE_REJECTED", "CHASE_UNVERIFIABLE")]
+    if not refused:
+        return ""
+    chases = sorted(e["chase"] for e in refused if isinstance(e.get("chase"), (int, float)))
+    unknown = sum(1 for e in refused if e.get("status") == "CHASE_UNVERIFIABLE")
+    text = f"<p>因追价被拒 {len(refused)} 次"
+    if chases:
+        text += (f"：追价中位 {chases[len(chases) // 2] * 100:.0f}%、"
+                 f"最高 {chases[-1] * 100:.0f}%（门槛 {cfg['follow']['max_chase_fraction'] * 100:.0f}%）")
+    if unknown:
+        text += f"；其中 {unknown} 次领投成交价未知"
+    return text + "。</p>"
+
+
 def build_report(cfg,store):
     accounts = {}
-    for venue in ("cex","dex","copy"):
+    for venue in ("cex","dex","copy","shadow"):
         state = store.get("account:"+venue)
         if state is None:
             continue
@@ -139,10 +221,14 @@ def build_report(cfg,store):
             "notifications":store.rows("SELECT status,count(*) AS n FROM outbox GROUP BY status"),
             "recent_local_rejections":store.rows("SELECT ts,payload FROM events WHERE kind='cex_rejection' ORDER BY id DESC LIMIT 20"),
             "recent_errors":store.rows("SELECT ts,kind,payload FROM events WHERE kind LIKE '%error%' OR kind LIKE '%unavailable%' ORDER BY id DESC LIMIT 20"),
-            "heartbeats":{k:store.get("heartbeat:"+k) for k in ("cex","dex","copy","scanner","maintenance")},
+            "heartbeats":{k:store.get("heartbeat:"+k) for k in ("cex","dex","copy","shadow","scanner","maintenance")},
             "copy_leaders":store.get("copy:leaders"),
             "forward_test":forward_test(store),
-            "recent_copy_entries":store.rows("SELECT ts,payload FROM events WHERE kind='copy_entry_result' ORDER BY id DESC LIMIT 20"),
+            "recent_copy_entries":store.rows(
+                "SELECT ts,payload FROM events WHERE kind='copy_entry_result' AND ts>=? ORDER BY id DESC LIMIT 200",
+                ((store.get("account:copy") or {}).get("created_at",0),)),
+            "copy_trips":round_trips(cfg,store,"copy"),
+            "shadow_trips":round_trips(cfg,store,"shadow"),
             "assumptions":{
                 "cex_latency_ms":cfg["cex"]["latency_ms"],"visible_depth_fraction":cfg["cex"]["visible_liquidity_fraction"],
                 "cex_fee_rate_fallback":cfg["cex"]["fee_rate"],"fee_currency":"USDT quote-equivalent",
@@ -237,7 +323,8 @@ def export_report(cfg,store):
                      + (f"，跟单延迟中位数 {sorted(lags)[len(lags)//2]:.1f} 秒" if lags else "")
                      + "。成交价是本程序自己的报价，不是被跟随钱包的成交价。</p>"
                      + platform_fee_note(cfg, len(filled))
-                     + refused_costs(entries) + "</section>")
+                     + refused_costs(entries) + refused_chases(cfg, entries) + "</section>")
+        cards.append(chase_card(cfg, report["copy_trips"], report["shadow_trips"]))
     for venue,item in report["accounts"].items():
         state = item["account"]
         marks = item["latest_mark"]

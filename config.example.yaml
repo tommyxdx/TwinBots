@@ -211,6 +211,30 @@ follow:
   trail_fraction: 0.30
   poll_s: 60
   mark_every_s: 300
+  # Charged on every copied fill. Set 0 to measure the theoretical edge first;
+  # the report still estimates what platform_fee_reference would have taken.
+  platform_fee_reference: 0.01
+  # A 90-day record says a wallet could trade, not that it still does.
+  min_recent_fills: 4
+  # Each leader's slice of the book; 0 splits it between the leaders chosen.
+  leader_share: 0
+  # Survive several daily rankings, not one. Counts only rankings that analysed
+  # the wallet, so a newly reconstructed one has nothing held against it.
+  retention_snapshots: 7
+  min_retention: 0.5
+  min_retention_snapshots: 4
+  # Chase: how much more we pay per token than the leader did. On a thin pool
+  # the leader's own order is the move, and a late follower buys its top.
+  # 0 turns the gate off. A leader whose median chase over min_chase_samples
+  # signals exceeds it is dropped as an impact trader.
+  max_chase_fraction: 0.25
+  min_chase_samples: 5
+  chase_window_days: 7
+  # A second book that takes every signal with no limits and trades nothing
+  # real, so measurement survives a halt and a refused trade can be priced.
+  # Its requests come from their own allowance, never the trading budget.
+  shadow_enabled: true
+  shadow_max_requests_per_day: 5000
 telegram:
   enabled: false
   token_env: TELEGRAM_BOT_TOKEN

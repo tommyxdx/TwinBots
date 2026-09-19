@@ -99,7 +99,7 @@ class DexPaper:
         """What one leg costs here. On the raw DEX path that is chain cost only."""
         return self.c["gas_usd_per_tx"]+self.c["extra_fee_usd"]
 
-    async def swap(self,token,side,amount,reason,prepared=None):
+    async def swap(self,token,side,amount,reason,prepared=None,meta=None):
         stable = self.c["quote_token"]
         a,b = (stable,token) if side=="BUY" else (token,stable)
         q = prepared or await self.quote(a,b,amount)
@@ -113,7 +113,7 @@ class DexPaper:
             raise ValueError("DEX sale exceeds virtual token balance")
         delay = self.rng.uniform(*self.c["latency_ms"])/1000
         order = self.ledger.submit(token,side,{"raw_input":amount,"initial_quote":q,"latency_s":delay,
-                                               "reason":reason,"atomic_swap":True})
+                                               "reason":reason,"atomic_swap":True,**(meta or {})})
         await asyncio.sleep(delay)
         if self.rng.random()<self.c["dropped_probability"]:
             order["network_fee"] = 0

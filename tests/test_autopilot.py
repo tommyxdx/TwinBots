@@ -59,6 +59,39 @@ def ledger_for(address):
     return {"schema_version": 1, "address": address, "transactions": [], "marks": []}
 
 
+def test_reset_archives_a_book_and_refuses_while_it_is_running(env):
+    """Nothing is deleted: an earlier run stays inspectable under its archive
+    label while the report and the risk limits see only the new one."""
+    from twobots.cli import reset_accounts
+    from twobots.execution import Ledger
+    from twobots.runtime import ProcessLock
+    cfg, store, _ = env
+    Ledger(store, "copy", 100)
+    state = store.get("account:copy")
+    state.update(cash=80.73, realized_pnl=-11.26, halted=True)
+    store.set("account:copy", state)
+    with store.transaction() as db:
+        db.execute("INSERT INTO orders VALUES(?,?,?,?,?,?,?)",
+                   ("o1", "copy", "T", "BUY", "FILLED", time.time(), "{}"))
+    store.set("copy:seen", {"x": 1})
+    store.set("copy:attempt:T", time.time())
+
+    with ProcessLock(store.root, "copy"):
+        with pytest.raises(RuntimeError, match="Stop it first"):
+            reset_accounts(store, ["copy", "shadow"])
+    assert store.get("account:copy")["halted"], "untouched while the bot runs"
+
+    done = reset_accounts(store, ["copy", "shadow"])
+    assert store.get("account:copy") is None and store.get("copy:seen") is None
+    assert store.get("copy:attempt:T") is None
+    assert done["copy"]["orders"] == 1 and done["copy"]["previous_realized_pnl"] == -11.26
+    label = done["copy"]["archived_as"]
+    assert store.rows("SELECT venue FROM orders WHERE id='o1'")[0]["venue"] == label
+    assert store.get("archive:account:" + label)["cash"] == 80.73
+    # The next start opens a fresh account from cash.
+    assert Ledger(store, "copy", 100).state()["halted"] is False
+
+
 def test_candidates_put_configured_addresses_before_discovery(env):
     cfg, store, _ = env
     cfg["wallets"]["addresses"] = [C]

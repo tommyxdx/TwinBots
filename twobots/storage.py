@@ -103,14 +103,16 @@ class Store:
         rows = self.rows(sql, (market, symbol))
         return rows[-limit:] if limit else rows
 
-    def budget(self, maximum):
+    def budget(self, maximum, scope=""):
         day = time.strftime("%Y-%m-%d", time.gmtime())
+        key = f"{scope}:{day}" if scope else day
         with self.transaction() as db:
-            row = db.execute("SELECT n FROM requests WHERE day=?", (day,)).fetchone()
+            row = db.execute("SELECT n FROM requests WHERE day=?", (key,)).fetchone()
             n = row[0] if row else 0
             if n >= maximum:
-                raise RuntimeError("Daily HTTP request budget exhausted; resume next UTC day.")
-            db.execute("INSERT OR REPLACE INTO requests VALUES(?,?)", (day, n + 1))
+                raise RuntimeError("Daily HTTP request budget exhausted"
+                                   + (f" for {scope}" if scope else "") + "; resume next UTC day.")
+            db.execute("INSERT OR REPLACE INTO requests VALUES(?,?)", (key, n + 1))
 
     def close(self):
         self.db.close()
