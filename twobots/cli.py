@@ -205,6 +205,13 @@ async def ledger_loop(cfg,store):
         await asyncio.sleep(cfg["wallets"]["ledger_build_every_s"])
 
 
+def followed(store):
+    """Every leader either book follows. The shadow keeps leaders the trading
+    book has dropped, and a feed nobody polls would give it nothing to follow."""
+    books = [(store.get(venue+":leaders") or {}).get("addresses",[]) for venue in ("copy","shadow")]
+    return list(dict.fromkeys(a for book in books for a in book))
+
+
 async def activity_loop(cfg,store):
     """Keep the followed leaders' fill feeds fresh; the copy trader reads the files."""
     from adapters.activity import poll_once
@@ -213,7 +220,7 @@ async def activity_loop(cfg,store):
     f,client = cfg["follow"],None
     while True:
         try:
-            leaders = (store.get("copy:leaders") or {}).get("addresses",[])
+            leaders = followed(store)
             if leaders:
                 # Built on first use so a missing key idles this loop instead of
                 # taking down the venues running alongside it.

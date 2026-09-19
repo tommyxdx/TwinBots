@@ -571,6 +571,9 @@ def test_a_leader_whose_profit_is_its_own_impact_is_dropped(env):
     bot = trader(cfg, store)
     assert bot.leaders(time.time()) == []
     assert "impact_trader" in bot.idle_reason(time.time())
+    # The shadow keeps following it: otherwise nothing could show what dropping
+    # an impact trader was worth, and its record would lapse and readmit it.
+    assert leader in shadow(cfg, store).leaders(time.time())
     # Counted once per signal: six, not twelve. Below the sample floor it is kept.
     assert len(bot.impact_record(time.time() + 301)[leader]) == 6
     cfg["follow"]["min_chase_samples"] = 7

@@ -92,6 +92,16 @@ def test_reset_archives_a_book_and_refuses_while_it_is_running(env):
     assert Ledger(store, "copy", 100).state()["halted"] is False
 
 
+def test_the_feed_poller_covers_leaders_only_the_shadow_follows(env):
+    from twobots.cli import followed
+    cfg, store, _ = env
+    store.set("copy:leaders", {"at": 0, "addresses": [A]})
+    store.set("shadow:leaders", {"at": 0, "addresses": [A, B]})
+    assert followed(store) == [A, B], "B was dropped by the trading book, not by the shadow"
+    store.set("shadow:leaders", {"at": 0, "addresses": []})
+    assert followed(store) == [A]
+
+
 def test_candidates_put_configured_addresses_before_discovery(env):
     cfg, store, _ = env
     cfg["wallets"]["addresses"] = [C]

@@ -193,7 +193,10 @@ class CopyTrader(DexPaper):
         # small, late follower is the counterparty to it, not a share in it.
         chases = (impact or {}).get(row["address"]) or []
         limit = self.f["max_chase_fraction"]
-        if limit and len(chases) >= self.f["min_chase_samples"]:
+        # The shadow keeps following an impact trader: it is the only book that
+        # can show what dropping one was worth, and the only one whose signals
+        # keep that leader's record current instead of letting it lapse.
+        if limit and self.enforce_chase and len(chases) >= self.f["min_chase_samples"]:
             if sorted(chases)[len(chases) // 2] > limit:
                 return "impact_trader"
         kept, seen = held.get(row["address"], (0, 0))
